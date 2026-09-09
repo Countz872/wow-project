@@ -1,4 +1,5 @@
---// Replay System v1.9.0
+--// Replay System v2.5.0
+--// Cloudflare D1 recording sync integration
 --// Compact Mobile UI
 --// Multiple Recordings + Mouse/Touch Dragging
 --// Movement + Pathfinding + Skill Replay
@@ -8,6 +9,18 @@ local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local PathfindingService = game:GetService("PathfindingService")
+
+--==================================================
+-- DIRECT CLOUDFLARE CONFIG
+--==================================================
+-- This version talks to Cloudflare directly from the LocalScript.
+-- This is convenient for testing, but the API key is visible to the client.
+-- For a public game, use a server-side proxy instead.
+local CLOUDFLARE_WORKER_URL = "https://project-replay.meijio12115.workers.dev/"
+local CLOUDFLARE_API_KEY = "ProjectReplay_2026_x8Kp92LmQ7vT4z"
+local CLOUDFLARE_SAVE_PATH = "/api/replay/save"
+local CLOUDFLARE_LOAD_PATH = "/api/replay/load/"
+
 
 local Player = Players.LocalPlayer
 local Backpack = nil
@@ -30,6 +43,7 @@ local ReplayDungeon = Remotes:WaitForChild("replayDungeon")
 
 local AutoStart = true
 local AutoReplay = true
+local AutoSave = true
 
 local LastAutoStartFire = 0
 local LastAutoReplayKey = nil
@@ -312,6 +326,281 @@ local Recordings = {}
 
 local SelectedRecording = nil
 
+--------------------------------------------------
+-- CLOUDFLARE CLOUD SAVE
+--------------------------------------------------
+
+local CloudBusy = false
+local CloudLoaded = false
+local CloudStatus = "Cloud: not loaded"
+local CloudUIRefresh = function() end
+
+local function SerializeRecording(Recording)
+	local Out = {
+		Name = Recording.Name,
+		Duration = Recording.Duration or 0,
+		Movement = {},
+		Actions = {},
+	}
+
+	for _, Point in ipairs(Recording.Movement or {}) do
+		local P = Point.Position
+		local C = Point.CFrame
+		local components = nil
+		if typeof(C) == "CFrame" then
+			components = {C:GetComponents()}
+		end
+		table.insert(Out.Movement, {
+			Time = Point.Time or 0,
+			Position = {P.X, P.Y, P.Z},
+			CFrame = components,
+		})
+	end
+
+	for _, Action in ipairs(Recording.Actions or {}) do
+		table.insert(Out.Actions, {
+			Time = Action.Time or 0,
+			ActionType = Action.ActionType or "Skill",
+			Key = Action.Key,
+			SkillName = Action.SkillName,
+		})
+	end
+
+	return Out
+end
+
+local function DeserializeRecording(Recording)
+	local Out = {
+		Name = tostring(Recording.Name or "Recording"),
+		Duration = tonumber(Recording.Duration) or 0,
+		Movement = {},
+		Actions = {},
+	}
+
+	for _, Point in ipairs(Recording.Movement or {}) do
+		local pos = Point.Position or {0, 0, 0}
+		local cf = Point.CFrame
+		local position = Vector3.new(tonumber(pos[1]) or 0, tonumber(pos[2]) or 0, tonumber(pos[3]) or 0)
+		local cframe = CFrame.new(position)
+		if type(cf) == "table" and #cf >= 12 then
+			local ok, value = pcall(function()
+				return CFrame.new(table.unpack(cf, 1, 12))
+			end)
+			if ok then cframe = value end
+		end
+		table.insert(Out.Movement, {
+			Time = tonumber(Point.Time) or 0,
+			Position = position,
+			CFrame = cframe,
+		})
+	end
+
+	for _, Action in ipairs(Recording.Actions or {}) do
+		table.insert(Out.Actions, {
+			Time = tonumber(Action.Time) or 0,
+			ActionType = Action.ActionType or "Skill",
+			Key = Action.Key,
+			SkillName = Action.SkillName,
+		})
+	end
+
+	return Out
+end
+
+local function BuildCloudPayload()
+	local Data = {
+		recordings = {},
+		settings = {
+			autoStart = AutoStart,
+			autoReplay = AutoReplay,
+			autoSave = AutoSave,
+			qSkill = QSkillName,
+			eSkill = ESkillName,
+		},
+	}
+	for _, Recording in ipairs(Recordings) do
+		table.insert(Data.recordings, SerializeRecording(Recording))
+	end
+	return Data
+end
+
+local function GetRequestFunction()
+	local candidates = {
+		(typeof(request) == "function" and request) or nil,
+		(typeof(http_request) == "function" and http_request) or nil,
+		(typeof(syn) == "table" and typeof(syn.request) == "function" and syn.request) or nil,
+		(typeof(http) == "table" and typeof(http.request) == "function" and http.request) or nil,
+	}
+
+	for _, fn in ipairs(candidates) do
+		if fn then
+			return fn
+		end
+	end
+
+	return nil
+end
+
+local function CloudRequest(Method, Url, Body)
+	if CLOUDFLARE_WORKER_URL:find("YOUR%-WORKER", 1, false) then
+		return false, "Set CLOUDFLARE_WORKER_URL first"
+	end
+
+	if CLOUDFLARE_API_KEY == "" or CLOUDFLARE_API_KEY == "PUT_YOUR_API_KEY_HERE" then
+		return false, "Set CLOUDFLARE_API_KEY first"
+	end
+
+	local requestFn = GetRequestFunction()
+	if not requestFn then
+		return false, "No client HTTP request function is available"
+	end
+
+	local headers = {
+		["Content-Type"] = "application/json",
+		["Authorization"] = "Bearer " .. CLOUDFLARE_API_KEY,
+	}
+
+	local requestData = {
+		Url = Url,
+		Method = Method,
+		Headers = headers,
+		Body = Body,
+		-- lowercase aliases help with some request implementations
+		url = Url,
+		method = Method,
+		headers = headers,
+		body = Body,
+	}
+
+	local ok, response = pcall(requestFn, requestData)
+	if not ok then
+		return false, tostring(response)
+	end
+
+	if not response then
+		return false, "No response"
+	end
+
+	local statusCode = tonumber(response.StatusCode or response.Status or response.status_code or 0) or 0
+	local responseBody = response.Body or response.body or ""
+
+	if statusCode < 200 or statusCode >= 300 then
+		return false, "HTTP " .. tostring(statusCode) .. ": " .. tostring(responseBody)
+	end
+
+	local decodeOk, decoded = pcall(function()
+		return game:GetService("HttpService"):JSONDecode(responseBody)
+	end)
+
+	if not decodeOk then
+		return false, "Invalid JSON response: " .. tostring(responseBody)
+	end
+
+	if decoded.success == false then
+		return false, tostring(decoded.error or "Cloudflare returned an error")
+	end
+
+	return true, decoded
+end
+
+local function SaveCloud(force)
+	if not AutoSave and not force then return end
+	if CloudBusy then return end
+	CloudBusy = true
+
+	task.spawn(function()
+		local HttpService = game:GetService("HttpService")
+		local payload = BuildCloudPayload()
+		local encoded
+
+		local encodeOk, encodeResult = pcall(function()
+			local requestPayload = {
+				userId = tostring(Player.UserId),
+				recordings = payload.recordings,
+				settings = payload.settings,
+			}
+			return HttpService:JSONEncode(requestPayload)
+		end)
+
+		if not encodeOk then
+			CloudStatus = "Cloud: encode failed"
+			warn("[Replay] Cloud encode failed:", encodeResult)
+			CloudBusy = false
+			CloudUIRefresh()
+			return
+		end
+
+		encoded = encodeResult
+
+		local ok, result = CloudRequest(
+			"POST",
+			CLOUDFLARE_WORKER_URL .. CLOUDFLARE_SAVE_PATH,
+			encoded
+		)
+
+		if ok and result and result.success then
+			CloudStatus = "Cloud: saved"
+			print("[Replay] Cloud save successful")
+		else
+			CloudStatus = "Cloud: save failed"
+			warn("[Replay] Cloud save failed:", result)
+		end
+
+		CloudBusy = false
+		CloudUIRefresh()
+	end)
+end
+
+local function LoadCloud()
+	if CloudBusy then return end
+	CloudBusy = true
+
+	task.spawn(function()
+		local ok, result = CloudRequest(
+			"GET",
+			CLOUDFLARE_WORKER_URL .. CLOUDFLARE_LOAD_PATH .. "?userId=" .. tostring(Player.UserId),
+			nil
+		)
+
+		if ok and result and result.success and result.found then
+			Recordings = {}
+
+			for _, Recording in ipairs(result.recordings or {}) do
+				table.insert(Recordings, DeserializeRecording(Recording))
+			end
+
+			local settings = result.settings or {}
+			if settings.qSkill then QSkillName = tostring(settings.qSkill) end
+			if settings.eSkill then ESkillName = tostring(settings.eSkill) end
+			if settings.autoStart ~= nil then AutoStart = settings.autoStart == true end
+			if settings.autoReplay ~= nil then AutoReplay = settings.autoReplay == true end
+			if settings.autoSave ~= nil then AutoSave = settings.autoSave == true end
+
+			if #Recordings > 0 then
+				SelectedRecording = Recordings[1]
+			end
+
+			CloudLoaded = true
+			CloudStatus = "Cloud: loaded " .. tostring(#Recordings) .. " recordings"
+			CloudUIRefresh()
+			print("[Replay] Cloud load successful:", #Recordings, "recordings")
+		elseif ok and result and result.success and not result.found then
+			Recordings = {}
+			CloudLoaded = true
+			CloudStatus = "Cloud: no saved data"
+			CloudUIRefresh()
+			print("[Replay] No cloud replay data found for this player")
+		else
+			CloudStatus = "Cloud: load failed"
+			warn("[Replay] Cloud load failed:", result)
+		end
+
+		CloudBusy = false
+		CloudUIRefresh()
+	end)
+end
+
+
 local RecordingCounter = 0
 
 local MovementMode = "MoveTo"
@@ -588,6 +877,9 @@ local function StopRecording()
 	CurrentRecording = nil
 
 	IsRecording = false
+
+	-- Persist the newly completed recording.
+	SaveCloud(false)
 
 	LastRecordTime = 0
 
@@ -3478,7 +3770,7 @@ local ReplayButton =
 --------------------------------------------------
 
 local DungeonSection = Instance.new("Frame")
-DungeonSection.Size = UDim2.new(1, -2, 0, 118)
+DungeonSection.Size = UDim2.new(1, -2, 0, 155)
 DungeonSection.BackgroundColor3 = PANEL
 DungeonSection.LayoutOrder = 3
 DungeonSection.Parent = Content
@@ -3533,6 +3825,7 @@ AutoStartButton.MouseButton1Click:Connect(function()
 		FireAutoStart()
 	end
 	UpdateDungeonButtons()
+	SaveCloud(false)
 end)
 
 AutoReplayButton.MouseButton1Click:Connect(function()
@@ -3541,9 +3834,57 @@ AutoReplayButton.MouseButton1Click:Connect(function()
 		LastAutoReplayKey = nil
 	end
 	UpdateDungeonButtons()
+	SaveCloud(false)
+end)
+
+local AutoSaveButton = CreateButton(
+	DungeonSection,
+	"Cloud Auto Save: ON",
+	UDim2.new(0.5, -15, 0, 31),
+	UDim2.fromOffset(10, 87),
+	GREEN
+)
+
+local CloudLoadButton = CreateButton(
+	DungeonSection,
+	"Load Cloud",
+	UDim2.new(0.5, -15, 0, 31),
+	UDim2.new(0.5, 5, 0, 87),
+	BLUE
+)
+
+local function UpdateCloudButtons()
+	AutoSaveButton.Text = AutoSave and "Cloud Auto Save: ON" or "Cloud Auto Save: OFF"
+	AutoSaveButton.BackgroundColor3 = AutoSave and GREEN or Color3.fromRGB(60, 60, 65)
+end
+
+AutoSaveButton.MouseButton1Click:Connect(function()
+	AutoSave = not AutoSave
+	UpdateCloudButtons()
+	SaveCloud(true)
+end)
+
+CloudLoadButton.MouseButton1Click:Connect(function()
+	LoadCloud()
 end)
 
 UpdateDungeonButtons()
+UpdateCloudButtons()
+
+-- Show cloud status using the existing status label once the UI is ready.
+CloudUIRefresh = function()
+	RefreshRecordingList()
+	UpdateDungeonButtons()
+	UpdateCloudButtons()
+	UpdateUI()
+end
+
+-- Automatically restore cloud recordings after the UI is initialized.
+task.delay(1.5, function()
+	if not CloudLoaded then
+		LoadCloud()
+	end
+end)
 
 --------------------------------------------------
 -- STATUS
