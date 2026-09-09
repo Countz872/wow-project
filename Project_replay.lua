@@ -1,4 +1,4 @@
---// Replay System v3.1.0
+--// Replay System v3.2.0
 --// Cloudflare D1 recording sync integration
 --// Compact Mobile UI
 --// Multiple Recordings + Mouse/Touch Dragging
@@ -49,6 +49,7 @@ local AutoReplay = true
 local AutoReplayRecording = true
 local AutoReplayRecordingName = nil
 local AutoSave = true
+local RecordRespawns = true
 
 local LastAutoStartFire = 0
 local LastAutoReplayKey = nil
@@ -438,6 +439,7 @@ local function BuildCloudPayload()
 			autoReplayRecording = AutoReplayRecording,
 			autoReplayRecordingName = AutoReplayRecordingName,
 			autoSave = AutoSave,
+			recordRespawns = RecordRespawns,
 			qSkill = QSkillName,
 			eSkill = ESkillName,
 		},
@@ -625,6 +627,7 @@ local function LoadCloud()
 				AutoReplayRecordingName = nil
 			end
 			if settings.autoSave ~= nil then AutoSave = settings.autoSave == true end
+		if settings.recordRespawns ~= nil then RecordRespawns = settings.recordRespawns == true end
 
 			SelectedRecording = nil
 			if #Recordings > 0 then
@@ -698,6 +701,7 @@ local LastRecordTime = 0
 -- Respawn/replay synchronization
 local ReplayRespawnPending = false
 local ReplayRespawnIndex = nil
+local RecordingRespawnPending = false
 
 --------------------------------------------------
 -- SKILL FUNCTIONS
@@ -1544,6 +1548,15 @@ local function ReplayActionsBetween(
 					Action.SkillName
 				)
 
+			elseif Action.ActionType == "Respawn" then
+				-- Reproduce a recorded intentional respawn. The game
+				-- handles the actual CharacterAdded/respawn sequence.
+				if Humanoid and Humanoid.Parent and Humanoid.Health > 0 then
+					pcall(function()
+						Humanoid.Health = 0
+					end)
+				end
+
 			end
 
 		end
@@ -1891,6 +1904,19 @@ Player.CharacterAdded:Connect(
 
 		-- Backpack can be repopulated during respawn. Refresh it too.
 		GetBackpack()
+
+		-- If we are recording, a CharacterAdded event means the player
+		-- intentionally respawned while recording. Save it as a timeline action.
+		if IsRecording and CurrentRecording and RecordRespawns and not RecordingRespawnPending then
+			local RespawnTime = os.clock() - CurrentRecording.StartTime
+			table.insert(CurrentRecording.Actions, {
+				Time = RespawnTime,
+				ActionType = "Respawn"
+			})
+			print("[Replay] Recorded respawn at", RespawnTime)
+		end
+
+		RecordingRespawnPending = false
 
 		if not IsReplaying then
 			return
@@ -4092,7 +4118,7 @@ local ReplayButton =
 --------------------------------------------------
 
 local DungeonSection = Instance.new("Frame")
-DungeonSection.Size = UDim2.new(1, -2, 0, 194)
+DungeonSection.Size = UDim2.new(1, -2, 0, 233)
 DungeonSection.BackgroundColor3 = PANEL
 DungeonSection.LayoutOrder = 3
 DungeonSection.Parent = Content
@@ -4195,17 +4221,34 @@ local AutoSaveButton = CreateButton(
 	GREEN
 )
 
+local RecordRespawnsButton = CreateButton(
+	DungeonSection,
+	"Record Respawns: ON",
+	UDim2.new(0.5, -15, 0, 31),
+	UDim2.fromOffset(10, 126),
+	GREEN
+)
+
+RecordRespawnsButton.MouseButton1Click:Connect(function()
+	RecordRespawns = not RecordRespawns
+	RecordRespawnsButton.Text = RecordRespawns and "Record Respawns: ON" or "Record Respawns: OFF"
+	RecordRespawnsButton.BackgroundColor3 = RecordRespawns and GREEN or Color3.fromRGB(60, 60, 65)
+	SaveCloud(true)
+end)
+
 local CloudLoadButton = CreateButton(
 	DungeonSection,
 	"Load Cloud",
 	UDim2.new(0.5, -15, 0, 31),
-	UDim2.fromOffset(10, 126),
+	UDim2.fromOffset(10, 165),
 	BLUE
 )
 
 local function UpdateCloudButtons()
 	AutoSaveButton.Text = AutoSave and "Cloud Auto Save: ON" or "Cloud Auto Save: OFF"
 	AutoSaveButton.BackgroundColor3 = AutoSave and GREEN or Color3.fromRGB(60, 60, 65)
+	RecordRespawnsButton.Text = RecordRespawns and "Record Respawns: ON" or "Record Respawns: OFF"
+	RecordRespawnsButton.BackgroundColor3 = RecordRespawns and GREEN or Color3.fromRGB(60, 60, 65)
 end
 
 AutoSaveButton.MouseButton1Click:Connect(function()
