@@ -21,12 +21,151 @@ GetBackpack()
 
 local Remotes = ReplicatedStorage:WaitForChild("remotes")
 local AbilityUsed = Remotes:WaitForChild("abilityUsed")
+local ChangeStartValue = Remotes:WaitForChild("changeStartValue")
+local ReplayDungeon = Remotes:WaitForChild("replayDungeon")
+
+--------------------------------------------------
+-- DUNGEON AUTO SYSTEM
+--------------------------------------------------
+
+local AutoStart = true
+local AutoReplay = true
+
+local LastAutoStartFire = 0
+local LastAutoReplayKey = nil
+local AUTO_START_COOLDOWN = 3
+local DUNGEON_SCAN_INTERVAL = 0.35
+
+local DungeonState = {
+	dungeonStarted = nil,
+	dungeonProgress = nil,
+	dungeonFinished = nil,
+	dungeonName = nil,
+	hardcore = false,
+	isHardcore = false,
+	fightingBoss = false
+}
+
+local function ReadValueObject(Object)
+	if not Object:IsA("ValueBase") then
+		return nil
+	end
+
+	local Success, Value = pcall(function()
+		return Object.Value
+	end)
+
+	return Success and Value or nil
+end
+
+local function FindDungeonField(FieldName)
+	local Containers = {
+		Player,
+		Player:FindFirstChild("PlayerGui"),
+		Character,
+		workspace,
+		ReplicatedStorage
+	}
+
+	for _, Container in ipairs(Containers) do
+		if Container then
+			local Attribute = Container:GetAttribute(FieldName)
+			if Attribute ~= nil then
+				return Attribute
+			end
+
+			local Direct = Container:FindFirstChild(FieldName, true)
+			if Direct then
+				local Value = ReadValueObject(Direct)
+				if Value ~= nil then
+					return Value
+				end
+			end
+		end
+	end
+
+	return nil
+end
+
+local function GetDungeonState()
+	local State = {}
+
+	State.dungeonStarted = FindDungeonField("dungeonStarted")
+	State.dungeonProgress = FindDungeonField("dungeonProgress")
+	State.dungeonFinished = FindDungeonField("dungeonFinished")
+	State.dungeonName = FindDungeonField("dungeonName")
+	State.hardcore = FindDungeonField("hardcore")
+	State.isHardcore = FindDungeonField("isHardcore")
+	State.fightingBoss = FindDungeonField("fightingBoss")
+
+	if State.hardcore == nil then State.hardcore = false end
+	if State.isHardcore == nil then State.isHardcore = State.hardcore end
+	if State.fightingBoss == nil then State.fightingBoss = true end
+
+	DungeonState = State
+	return State
+end
+
+local function FireAutoStart()
+	local Now = os.clock()
+	if Now - LastAutoStartFire < AUTO_START_COOLDOWN then
+		return
+	end
+
+	local Success, ErrorMessage = pcall(function()
+		ChangeStartValue:FireServer()
+	end)
+
+	if Success then
+		LastAutoStartFire = Now
+		print("[Replay] Auto Start -> changeStartValue")
+	else
+		warn("[Replay] Auto Start error:", ErrorMessage)
+	end
+end
+
+local function FireAutoReplay(State)
+	if State.dungeonProgress ~= "bossKilled" then
+		return
+	end
+
+	local DungeonName = State.dungeonName
+	if DungeonName == nil or tostring(DungeonName) == "" then
+		DungeonName = "Unknown Dungeon"
+	end
+
+	local ReplayKey = tostring(DungeonName) .. "|bossKilled"
+	if LastAutoReplayKey == ReplayKey then
+		return
+	end
+
+	local Payload = {
+		dungeonProgress = "bossKilled",
+		dungeonStarted = State.dungeonStarted == nil and true or State.dungeonStarted,
+		dungeonFinished = State.dungeonFinished == nil and true or State.dungeonFinished,
+		hardcore = State.hardcore == true,
+		dungeonName = tostring(DungeonName),
+		isHardcore = State.isHardcore == true,
+		fightingBoss = State.fightingBoss == nil and true or State.fightingBoss
+	}
+
+	local Success, ErrorMessage = pcall(function()
+		ReplayDungeon:FireServer(Payload)
+	end)
+
+	if Success then
+		LastAutoReplayKey = ReplayKey
+		print("[Replay] Auto Replay ->", Payload.dungeonName, Payload.dungeonProgress)
+	else
+		warn("[Replay] Auto Replay error:", ErrorMessage)
+	end
+end
 
 --------------------------------------------------
 -- CONFIG
 --------------------------------------------------
 
-local VERSION = "v2.0.0"
+local VERSION = "v2.1.0"
 
 local RECORD_INTERVAL = 0.05
 
@@ -3250,6 +3389,78 @@ local ReplayButton =
 	)
 
 --------------------------------------------------
+-- DUNGEON AUTO SECTION
+--------------------------------------------------
+
+local DungeonSection = Instance.new("Frame")
+DungeonSection.Size = UDim2.new(1, -2, 0, 118)
+DungeonSection.BackgroundColor3 = PANEL
+DungeonSection.LayoutOrder = 3
+DungeonSection.Parent = Content
+AddCorner(DungeonSection, 8)
+
+local DungeonTitle = CreateLabel(
+	DungeonSection,
+	"Dungeon Automation",
+	UDim2.new(1, -20, 0, 20),
+	UDim2.fromOffset(10, 6),
+	12,
+	TEXT
+)
+DungeonTitle.Font = Enum.Font.GothamBold
+
+local DungeonInfo = CreateLabel(
+	DungeonSection,
+	"Scanning dungeon state...",
+	UDim2.new(1, -20, 0, 17),
+	UDim2.fromOffset(10, 25),
+	8,
+	SUBTEXT
+)
+
+local AutoStartButton = CreateButton(
+	DungeonSection,
+	"Auto Start: ON",
+	UDim2.new(0.5, -15, 0, 31),
+	UDim2.fromOffset(10, 48),
+	GREEN
+)
+
+local AutoReplayButton = CreateButton(
+	DungeonSection,
+	"Auto Replay: ON",
+	UDim2.new(0.5, -15, 0, 31),
+	UDim2.new(0.5, 5, 0, 48),
+	GREEN
+)
+
+local function UpdateDungeonButtons()
+	AutoStartButton.Text = AutoStart and "Auto Start: ON" or "Auto Start: OFF"
+	AutoStartButton.BackgroundColor3 = AutoStart and GREEN or Color3.fromRGB(60, 60, 65)
+	AutoReplayButton.Text = AutoReplay and "Auto Replay: ON" or "Auto Replay: OFF"
+	AutoReplayButton.BackgroundColor3 = AutoReplay and GREEN or Color3.fromRGB(60, 60, 65)
+end
+
+AutoStartButton.MouseButton1Click:Connect(function()
+	AutoStart = not AutoStart
+	if AutoStart then
+		LastAutoStartFire = 0
+		FireAutoStart()
+	end
+	UpdateDungeonButtons()
+end)
+
+AutoReplayButton.MouseButton1Click:Connect(function()
+	AutoReplay = not AutoReplay
+	if not AutoReplay then
+		LastAutoReplayKey = nil
+	end
+	UpdateDungeonButtons()
+end)
+
+UpdateDungeonButtons()
+
+--------------------------------------------------
 -- STATUS
 --------------------------------------------------
 
@@ -3710,6 +3921,38 @@ ReplayButton.MouseButton1Click:Connect(
 
 	end
 )
+
+--------------------------------------------------
+-- DUNGEON STATE SCANNER
+--------------------------------------------------
+
+task.spawn(function()
+	while true do
+		local State = GetDungeonState()
+
+		local Name = State.dungeonName
+		if Name == nil or tostring(Name) == "" then
+			Name = "Unknown"
+		end
+
+		DungeonInfo.Text = string.format(
+			"Name: %s  •  Progress: %s  •  Started: %s",
+			tostring(Name),
+			tostring(State.dungeonProgress or "unknown"),
+			tostring(State.dungeonStarted == true)
+		)
+
+		if AutoStart and State.dungeonStarted ~= true then
+			FireAutoStart()
+		end
+
+		if AutoReplay then
+			FireAutoReplay(State)
+		end
+
+		task.wait(DUNGEON_SCAN_INTERVAL)
+	end
+end)
 
 --------------------------------------------------
 -- MAIN LOOP
