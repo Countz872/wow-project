@@ -1,4 +1,4 @@
---// Replay System v3.2.0
+--// Replay System v3.2.1
 --// Cloudflare D1 recording sync integration
 --// Compact Mobile UI
 --// Multiple Recordings + Mouse/Touch Dragging
@@ -319,6 +319,38 @@ local Character
 local Humanoid
 local RootPart
 
+local IsRecording = false
+local IsReplaying = false
+local CurrentRecording = nil
+local Recordings = {}
+local SelectedRecording = nil
+
+local ConnectedDeathHumanoid = nil
+
+local function ConnectRespawnRecording(HumanoidToWatch)
+	if not HumanoidToWatch or ConnectedDeathHumanoid == HumanoidToWatch then
+		return
+	end
+
+	ConnectedDeathHumanoid = HumanoidToWatch
+
+	HumanoidToWatch.Died:Connect(function()
+		-- Capture the respawn at death time, not CharacterAdded time.
+		-- CharacterAdded fires only after Roblox's respawn delay.
+		if not IsRecording or not CurrentRecording or not RecordRespawns then
+			return
+		end
+
+		local RespawnTime = os.clock() - CurrentRecording.StartTime
+		table.insert(CurrentRecording.Actions, {
+			Time = RespawnTime,
+			ActionType = "Respawn"
+		})
+
+		print("[Replay] Recorded respawn at", RespawnTime)
+	end)
+end
+
 local function SetupCharacter(NewCharacter)
 
 	Character = NewCharacter
@@ -326,26 +358,13 @@ local function SetupCharacter(NewCharacter)
 	Humanoid = Character:WaitForChild("Humanoid")
 	RootPart = Character:WaitForChild("HumanoidRootPart")
 
+	ConnectRespawnRecording(Humanoid)
+
 end
 
 if Player.Character then
 	SetupCharacter(Player.Character)
 end
-
---------------------------------------------------
--- STATE
---------------------------------------------------
-
-local IsRecording = false
-local IsReplaying = false
-
-local CurrentRecording = nil
-
--- IMPORTANT:
--- Every recording is stored separately in this table.
-local Recordings = {}
-
-local SelectedRecording = nil
 
 --------------------------------------------------
 -- CLOUDFLARE CLOUD SAVE
@@ -1904,17 +1923,6 @@ Player.CharacterAdded:Connect(
 
 		-- Backpack can be repopulated during respawn. Refresh it too.
 		GetBackpack()
-
-		-- If we are recording, a CharacterAdded event means the player
-		-- intentionally respawned while recording. Save it as a timeline action.
-		if IsRecording and CurrentRecording and RecordRespawns and not RecordingRespawnPending then
-			local RespawnTime = os.clock() - CurrentRecording.StartTime
-			table.insert(CurrentRecording.Actions, {
-				Time = RespawnTime,
-				ActionType = "Respawn"
-			})
-			print("[Replay] Recorded respawn at", RespawnTime)
-		end
 
 		RecordingRespawnPending = false
 
