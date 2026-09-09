@@ -3850,6 +3850,9 @@ local function RefreshAutoReplayDropdown()
 
 	task.defer(function()
 		AutoReplayDropdownList.CanvasSize = UDim2.fromOffset(0, AutoReplayDropdownLayout.AbsoluteContentSize.Y + 6)
+		if UpdateAutoReplayCurrentButton then
+			UpdateAutoReplayCurrentButton()
+		end
 	end)
 end
 
@@ -4081,6 +4084,12 @@ UpdateCloudButtons()
 -- Show cloud status using the existing status label once the UI is ready.
 CloudUIRefresh = function()
 	RefreshRecordingList()
+	-- Keep the Auto Replay Current label synchronized with the actual
+	-- AutoReplayRecordingName value restored/used by the replay system.
+	-- This is intentionally separate from the normal SelectedRecording UI.
+	if UpdateAutoReplayCurrentButton then
+		UpdateAutoReplayCurrentButton()
+	end
 	UpdateDungeonButtons()
 	UpdateCloudButtons()
 	UpdateUI()
