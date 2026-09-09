@@ -10,7 +10,14 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local PathfindingService = game:GetService("PathfindingService")
 
 local Player = Players.LocalPlayer
-local Backpack = Player:WaitForChild("Backpack")
+local Backpack = nil
+
+local function GetBackpack()
+	Backpack = Player:FindFirstChildOfClass("Backpack") or Player:FindFirstChild("Backpack")
+	return Backpack
+end
+
+GetBackpack()
 
 local Remotes = ReplicatedStorage:WaitForChild("remotes")
 local AbilityUsed = Remotes:WaitForChild("abilityUsed")
@@ -19,7 +26,7 @@ local AbilityUsed = Remotes:WaitForChild("abilityUsed")
 -- CONFIG
 --------------------------------------------------
 
-local VERSION = "v1.9.0"
+local VERSION = "v2.0.0"
 
 local RECORD_INTERVAL = 0.05
 
@@ -106,6 +113,10 @@ local ReplayMovementIndex = 1
 
 local LastRecordTime = 0
 
+-- Respawn/replay synchronization
+local ReplayRespawnPending = false
+local ReplayRespawnIndex = nil
+
 --------------------------------------------------
 -- SKILL FUNCTIONS
 --------------------------------------------------
@@ -116,7 +127,9 @@ local function FindSkill(SkillName)
 		return nil
 	end
 
-	local Skill = Backpack:FindFirstChild(SkillName)
+	local CurrentBackpack = GetBackpack()
+
+	local Skill = CurrentBackpack and CurrentBackpack:FindFirstChild(SkillName)
 
 	if Skill then
 		return Skill
@@ -1016,13 +1029,56 @@ local function ReplayMovement(
 	while IsReplaying do
 
 		if not Character
+			or not Character.Parent
 			or not Humanoid
+			or not Humanoid.Parent
 			or not RootPart
+			or not RootPart.Parent
 			or Humanoid.Health <= 0 then
 
+			-- IMPORTANT: do not let replay time continue while dead.
+			-- Otherwise all Q/E actions can be consumed before respawn.
 			task.wait(0.1)
-
 			continue
+		end
+
+		-- A new character has spawned. Resume the replay from the
+		-- nearest recorded path point and reset the replay clock.
+		if ReplayRespawnPending then
+			local ResumeIndex = ReplayRespawnIndex
+
+			if not ResumeIndex then
+				ResumeIndex = FindNearestMovementIndex(
+					Recording,
+					RootPart.Position
+				)
+			end
+
+			ResumeIndex = math.clamp(
+				ResumeIndex,
+				1,
+				#Movement
+			)
+
+			ReplayMovementIndex = ResumeIndex
+
+			StartTime = Movement[ResumeIndex].Time or 0
+			ReplayTime = StartTime
+			PreviousTime = StartTime
+			RealStart = os.clock()
+
+			ClearPath()
+			MovementMode = "MoveTo"
+			CurrentTarget = nil
+			LastMoveCommand = 0
+			LastStuckCheck = 0
+			LastStuckPosition = RootPart.Position
+			StuckStartTime = os.clock()
+
+			ReplayRespawnPending = false
+			ReplayRespawnIndex = nil
+
+			print("[Replay] Respawned. Resuming from point:", ResumeIndex)
 		end
 
 		local CurrentRealTime =
@@ -1242,11 +1298,14 @@ end
 Player.CharacterAdded:Connect(
 	function(NewCharacter)
 
+		-- Refresh every character reference. The old Humanoid/RootPart
+		-- are destroyed when the player dies.
 		SetupCharacter(
 			NewCharacter
 		)
 
-		task.wait(1)
+		-- Backpack can be repopulated during respawn. Refresh it too.
+		GetBackpack()
 
 		if not IsReplaying then
 			return
@@ -1256,7 +1315,10 @@ Player.CharacterAdded:Connect(
 			return
 		end
 
-		if not RootPart then
+		-- Wait for the new character and its skill tools to finish spawning.
+		task.wait(0.75)
+
+		if not RootPart or not RootPart.Parent then
 			return
 		end
 
@@ -1269,8 +1331,13 @@ Player.CharacterAdded:Connect(
 		ReplayMovementIndex =
 			NearestIndex
 
+		ReplayRespawnIndex =
+			NearestIndex
+
+		ReplayRespawnPending = true
+
 		print(
-			"[Replay] Resume point:",
+			"[Replay] Respawn detected. Resume point:",
 			NearestIndex
 		)
 
@@ -1780,101 +1847,151 @@ MinimizeButton.MouseButton1Click:Connect(
 -- MOBILE + PC DRAGGING
 --------------------------------------------------
 
+-- Use a dedicated drag handle instead of Header.InputBegan.
+-- Header.InputBegan + Input.Target is unreliable and InputObject
+-- does not provide a dependable Target property for this use.
+local DragHandle =
+	Instance.new("Frame")
+
+DragHandle.Name =
+	"DragHandle"
+
+DragHandle.Size =
+	UDim2.new(
+		1,
+		-132,
+		1,
+		0
+	)
+
+DragHandle.Position =
+	UDim2.fromOffset(
+		0,
+		0
+	)
+
+DragHandle.BackgroundTransparency =
+	1
+
+DragHandle.BorderSizePixel =
+	0
+
+DragHandle.Active =
+	true
+
+DragHandle.ZIndex =
+	10
+
+DragHandle.Parent =
+	Header
+
+-- Keep the title/version visible above the handle while still allowing
+-- the transparent handle to receive input.
+Title.ZIndex = 11
+VersionLabel.ZIndex = 11
+
 local Dragging = false
 local DragStart = nil
 local StartPosition = nil
+local DragInput = nil
 
 local function BeginDrag(Input)
-
 	Dragging = true
+	DragStart = Input.Position
+	StartPosition = MainFrame.Position
+	DragInput = Input
+end
 
-	DragStart =
-		Input.Position
-
-	StartPosition =
-		MainFrame.Position
-
+local function EndDrag(Input)
+	if Input.UserInputType == Enum.UserInputType.MouseButton1
+		or Input.UserInputType == Enum.UserInputType.Touch then
+		Dragging = false
+		DragInput = nil
+	end
 end
 
 local function UpdateDrag(Input)
-
-	if not Dragging then
+	if not Dragging or not DragStart or not StartPosition then
 		return
 	end
 
 	local Delta =
-		Input.Position
-		- DragStart
+		Input.Position - DragStart
 
 	MainFrame.Position =
 		UDim2.new(
 			StartPosition.X.Scale,
-			StartPosition.X.Offset
-				+ Delta.X,
-
+			StartPosition.X.Offset + Delta.X,
 			StartPosition.Y.Scale,
-			StartPosition.Y.Offset
-				+ Delta.Y
+			StartPosition.Y.Offset + Delta.Y
 		)
-
 end
 
-Header.InputBegan:Connect(
+DragHandle.InputBegan:Connect(
 	function(Input)
+		if Input.UserInputType == Enum.UserInputType.MouseButton1
+			or Input.UserInputType == Enum.UserInputType.Touch then
+			BeginDrag(Input)
 
-		if Input.UserInputType ==
-			Enum.UserInputType.MouseButton1
-			or
-			Input.UserInputType ==
-			Enum.UserInputType.Touch then
-
-			if Input.Target ==
-				MinimizeButton then
-
-				return
-			end
-
-			BeginDrag(
-				Input
-			)
-
+			Input.Changed:Connect(function()
+				if Input.UserInputState == Enum.UserInputState.End then
+					EndDrag(Input)
+				end
+			end)
 		end
-
 	end
 )
 
-Header.InputEnded:Connect(
+DragHandle.InputChanged:Connect(
 	function(Input)
-
-		if Input.UserInputType ==
-			Enum.UserInputType.MouseButton1
-			or
-			Input.UserInputType ==
-			Enum.UserInputType.Touch then
-
-			Dragging =
-				false
-
+		if Input.UserInputType == Enum.UserInputType.MouseMovement
+			or Input.UserInputType == Enum.UserInputType.Touch then
+			DragInput = Input
 		end
-
 	end
 )
+
+-- Forward title/version touches to the same drag system.
+-- This makes dragging reliable even when the text itself is the
+-- topmost GUI object under the finger/cursor.
+local function ConnectDragObject(Object)
+	Object.InputBegan:Connect(function(Input)
+		if Input.UserInputType == Enum.UserInputType.MouseButton1
+			or Input.UserInputType == Enum.UserInputType.Touch then
+			BeginDrag(Input)
+
+			Input.Changed:Connect(function()
+				if Input.UserInputState == Enum.UserInputState.End then
+					EndDrag(Input)
+				end
+			end)
+		end
+	end)
+end
+
+ConnectDragObject(Title)
+ConnectDragObject(VersionLabel)
 
 UserInputService.InputChanged:Connect(
 	function(Input)
-
-		if Input.UserInputType ==
-			Enum.UserInputType.MouseMovement
-			or
-			Input.UserInputType ==
-			Enum.UserInputType.Touch then
-
-			UpdateDrag(
-				Input
-			)
-
+		if not Dragging then
+			return
 		end
 
+		if Input.UserInputType == Enum.UserInputType.MouseMovement
+			or Input.UserInputType == Enum.UserInputType.Touch then
+			if Input == DragInput
+				or Input.UserInputType == Enum.UserInputType.MouseMovement
+				then
+				UpdateDrag(Input)
+			end
+		end
+	end
+)
+
+UserInputService.InputEnded:Connect(
+	function(Input)
+		EndDrag(Input)
 	end
 )
 
