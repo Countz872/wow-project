@@ -1,4 +1,4 @@
---// Replay System v2.9.0
+--// Replay System v3.0.0
 --// Cloudflare D1 recording sync integration
 --// Compact Mobile UI
 --// Multiple Recordings + Mouse/Touch Dragging
@@ -47,6 +47,7 @@ local ReplayDungeon = Remotes:WaitForChild("replayDungeon")
 local AutoStart = true
 local AutoReplay = true
 local AutoReplayRecording = true
+local AutoReplayRecordingName = nil
 local AutoSave = true
 
 local LastAutoStartFire = 0
@@ -435,6 +436,7 @@ local function BuildCloudPayload()
 			autoStart = AutoStart,
 			autoReplay = AutoReplay,
 			autoReplayRecording = AutoReplayRecording,
+			autoReplayRecordingName = AutoReplayRecordingName,
 			autoSave = AutoSave,
 			qSkill = QSkillName,
 			eSkill = ESkillName,
@@ -617,11 +619,31 @@ local function LoadCloud()
 			if settings.autoStart ~= nil then AutoStart = settings.autoStart == true end
 			if settings.autoReplay ~= nil then AutoReplay = settings.autoReplay == true end
 			if settings.autoReplayRecording ~= nil then AutoReplayRecording = settings.autoReplayRecording == true end
+			if settings.autoReplayRecordingName ~= nil and tostring(settings.autoReplayRecordingName) ~= "" then
+				AutoReplayRecordingName = tostring(settings.autoReplayRecordingName)
+			else
+				AutoReplayRecordingName = nil
+			end
 			if settings.autoSave ~= nil then AutoSave = settings.autoSave == true end
 
 			SelectedRecording = nil
 			if #Recordings > 0 then
 				SelectedRecording = Recordings[1]
+			end
+
+			-- Restore the exact recording assigned to Auto Replay Recording.
+			if AutoReplayRecordingName then
+				local FoundAutoReplayRecording = false
+				for _, Recording in ipairs(Recordings) do
+					if tostring(Recording.Name) == tostring(AutoReplayRecordingName) then
+						AutoReplayRecordingName = Recording.Name
+						FoundAutoReplayRecording = true
+						break
+					end
+				end
+				if not FoundAutoReplayRecording then
+					AutoReplayRecordingName = nil
+				end
 			end
 
 			CloudLoaded = true
@@ -3218,7 +3240,7 @@ SavedSection.Size =
 		1,
 		-2,
 		0,
-		245
+		270
 	)
 
 SavedSection.BackgroundColor3 =
@@ -3426,6 +3448,8 @@ end
 --------------------------------------------------
 -- REFRESH RECORDING LIST
 --------------------------------------------------
+
+local UpdateAutoReplayCurrentButton
 
 local function RefreshRecordingList()
 
@@ -3731,6 +3755,114 @@ local function RefreshRecordingList()
 	)
 
 end
+
+--------------------------------------------------
+-- AUTO REPLAY RECORDING SELECTION
+--------------------------------------------------
+
+local AutoReplayCurrentButton = CreateButton(
+	SavedSection,
+	"Auto Replay: None",
+	UDim2.new(1, -20, 0, 31),
+	UDim2.fromOffset(10, 225),
+	BLUE
+)
+
+local AutoReplayDropdown = Instance.new("Frame")
+AutoReplayDropdown.Size = UDim2.new(1, -20, 0, 130)
+AutoReplayDropdown.Position = UDim2.fromOffset(10, 259)
+AutoReplayDropdown.BackgroundColor3 = Color3.fromRGB(25, 25, 29)
+AutoReplayDropdown.Visible = false
+AutoReplayDropdown.ZIndex = 50
+AutoReplayDropdown.Parent = ScreenGui
+AddCorner(AutoReplayDropdown, 6)
+AddStroke(AutoReplayDropdown, BLUE, 0.2)
+
+local AutoReplayDropdownList = Instance.new("ScrollingFrame")
+AutoReplayDropdownList.Size = UDim2.new(1, -8, 1, -8)
+AutoReplayDropdownList.Position = UDim2.fromOffset(4, 4)
+AutoReplayDropdownList.BackgroundTransparency = 1
+AutoReplayDropdownList.BorderSizePixel = 0
+AutoReplayDropdownList.ScrollBarThickness = 3
+AutoReplayDropdownList.CanvasSize = UDim2.fromOffset(0, 0)
+AutoReplayDropdownList.ZIndex = 51
+AutoReplayDropdownList.Parent = AutoReplayDropdown
+
+local AutoReplayDropdownLayout = Instance.new("UIListLayout")
+AutoReplayDropdownLayout.Padding = UDim.new(0, 4)
+AutoReplayDropdownLayout.Parent = AutoReplayDropdownList
+
+UpdateAutoReplayCurrentButton = function()
+	if AutoReplayRecordingName and AutoReplayRecordingName ~= "" then
+		AutoReplayCurrentButton.Text = "Auto Replay Current: " .. tostring(AutoReplayRecordingName)
+	else
+		AutoReplayCurrentButton.Text = "Auto Replay Current: None"
+	end
+end
+
+local function RefreshAutoReplayDropdown()
+	for _, Child in ipairs(AutoReplayDropdownList:GetChildren()) do
+		if Child:IsA("TextButton") then
+			Child:Destroy()
+		end
+	end
+
+	local NoneButton = Instance.new("TextButton")
+	NoneButton.Size = UDim2.new(1, -4, 0, 30)
+	NoneButton.BackgroundColor3 = (AutoReplayRecordingName == nil) and Color3.fromRGB(45, 55, 75) or INPUT
+	NoneButton.TextColor3 = TEXT
+	NoneButton.Font = Enum.Font.GothamMedium
+	NoneButton.TextSize = 9
+	NoneButton.Text = "None (disable selected recording)"
+	NoneButton.TextXAlignment = Enum.TextXAlignment.Left
+	NoneButton.ZIndex = 52
+	NoneButton.Parent = AutoReplayDropdownList
+	AddCorner(NoneButton, 5)
+	NoneButton.MouseButton1Click:Connect(function()
+		AutoReplayRecordingName = nil
+		AutoReplayDropdown.Visible = false
+		UpdateAutoReplayCurrentButton()
+		RefreshAutoReplayDropdown()
+		SaveCloud(true)
+	end)
+
+	for _, Recording in ipairs(Recordings) do
+		local Button = Instance.new("TextButton")
+		Button.Size = UDim2.new(1, -4, 0, 30)
+		Button.BackgroundColor3 = (Recording.Name == AutoReplayRecordingName) and Color3.fromRGB(45, 55, 75) or INPUT
+		Button.TextColor3 = TEXT
+		Button.Font = Enum.Font.GothamMedium
+		Button.TextSize = 9
+		Button.Text = Recording.Name
+		Button.TextXAlignment = Enum.TextXAlignment.Left
+		Button.ZIndex = 52
+		Button.Parent = AutoReplayDropdownList
+		AddCorner(Button, 5)
+
+		Button.MouseButton1Click:Connect(function()
+			AutoReplayRecordingName = Recording.Name
+			AutoReplayDropdown.Visible = false
+			UpdateAutoReplayCurrentButton()
+			RefreshAutoReplayDropdown()
+			SaveCloud(true)
+		end)
+	end
+
+	task.defer(function()
+		AutoReplayDropdownList.CanvasSize = UDim2.fromOffset(0, AutoReplayDropdownLayout.AbsoluteContentSize.Y + 6)
+	end)
+end
+
+AutoReplayCurrentButton.MouseButton1Click:Connect(function()
+	RefreshAutoReplayDropdown()
+	if not AutoReplayDropdown.Visible then
+		local Position = SavedSection.AbsolutePosition
+		AutoReplayDropdown.Position = UDim2.fromOffset(Position.X + 10, Position.Y + 259)
+	end
+	AutoReplayDropdown.Visible = not AutoReplayDropdown.Visible
+end)
+
+UpdateAutoReplayCurrentButton()
 
 --------------------------------------------------
 -- REPLAY SECTION
@@ -4482,12 +4614,25 @@ task.spawn(function()
 					-- Something is already replaying, so don't start a second replay.
 					AutoReplayRecordingAt = nil
 				elseif not IsRecording then
-					if not SelectedRecording and #Recordings > 0 then
-						SelectedRecording = Recordings[1]
+					local RecordingToPlay = nil
+					if AutoReplayRecordingName then
+						for _, Recording in ipairs(Recordings) do
+							if tostring(Recording.Name) == tostring(AutoReplayRecordingName) then
+								RecordingToPlay = Recording
+								break
+							end
+						end
 					end
 
-					if SelectedRecording and SelectedRecording.Movement and #SelectedRecording.Movement > 0 then
-						print("[Replay] Auto Replay Recording ->", tostring(SelectedRecording.Name))
+					if not RecordingToPlay and #Recordings > 0 then
+						RecordingToPlay = Recordings[1]
+						AutoReplayRecordingName = RecordingToPlay.Name
+						UpdateAutoReplayCurrentButton()
+					end
+
+					if RecordingToPlay and RecordingToPlay.Movement and #SelectedRecording.Movement > 0 then
+						SelectedRecording = RecordingToPlay
+						print("[Replay] Auto Replay Recording ->", tostring(RecordingToPlay.Name))
 						StartReplay()
 						AutoReplayRecordingAt = nil
 					else
