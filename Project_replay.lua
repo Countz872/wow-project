@@ -1,6 +1,6 @@
 --//========================================================
 --// REPLAY SYSTEM
---// NORMAL WALKING + PATHFINDING + ATTACK + Q/E
+--// MOVEMENT + PATHFINDING + ATTACK + MULTIPLE SKILLS
 --// NO TELEPORTING
 --// SINGLE LOCAL SCRIPT
 --//========================================================
@@ -19,20 +19,12 @@ local Player = Players.LocalPlayer
 
 local RECORD_INTERVAL = 0.1
 
--- How close we need to get to a recorded point
 local WAYPOINT_DISTANCE = 3
-
--- How close we need to get to a generated path point
 local PATH_POINT_DISTANCE = 3
 
--- How often we check if a new path is needed
 local PATH_RECALCULATE_TIME = 0.5
-
--- If the character hasn't moved this much for this long,
--- assume it is stuck.
 local STUCK_TIME = 1.5
 
--- Maximum distance allowed when finding the path after death
 local MAX_RESUME_DISTANCE = 150
 
 --========================================================
@@ -79,7 +71,7 @@ local ReplayConnection = nil
 local ResumeAfterDeath = false
 
 --========================================================
--- REPLAY
+-- REPLAY STATE
 --========================================================
 
 local ReplayIndex = 1
@@ -87,7 +79,7 @@ local ReplayStartTime = 0
 local ReplayInputIndex = 1
 
 --========================================================
--- PATHFINDING
+-- PATHFINDING STATE
 --========================================================
 
 local CurrentPath = nil
@@ -146,6 +138,83 @@ local function ResetPath()
 end
 
 --========================================================
+-- FIND TOOL
+--========================================================
+
+local function FindTool(ToolName)
+
+	if not ToolName then
+		return nil
+	end
+
+	local Tool
+
+	-- First check equipped tools
+	if Character then
+
+		Tool =
+			Character:FindFirstChild(
+				ToolName
+			)
+
+		if Tool and Tool:IsA("Tool") then
+			return Tool
+		end
+
+	end
+
+	-- Then check Backpack
+	local Backpack =
+		Player:FindFirstChild(
+			"Backpack"
+		)
+
+	if Backpack then
+
+		Tool =
+			Backpack:FindFirstChild(
+				ToolName
+			)
+
+		if Tool and Tool:IsA("Tool") then
+			return Tool
+		end
+
+	end
+
+	return nil
+
+end
+
+--========================================================
+-- GET CURRENT EQUIPPED TOOL
+--========================================================
+
+local function GetCurrentSkillTool()
+
+	if not Character then
+		return nil
+	end
+
+	for _, Child in
+		ipairs(
+			Character:GetChildren()
+		)
+	do
+
+		if Child:IsA("Tool") then
+
+			return Child
+
+		end
+
+	end
+
+	return nil
+
+end
+
+--========================================================
 -- CHARACTER SETUP
 --========================================================
 
@@ -154,10 +223,14 @@ local function SetupCharacter(NewCharacter)
 	Character = NewCharacter
 
 	Humanoid =
-		NewCharacter:WaitForChild("Humanoid")
+		NewCharacter:WaitForChild(
+			"Humanoid"
+		)
 
 	RootPart =
-		NewCharacter:WaitForChild("HumanoidRootPart")
+		NewCharacter:WaitForChild(
+			"HumanoidRootPart"
+		)
 
 	ResetPath()
 
@@ -169,125 +242,133 @@ local function SetupCharacter(NewCharacter)
 	end
 
 	DeathConnection =
-		Humanoid.Died:Connect(function()
+		Humanoid.Died:Connect(
+			function()
 
-			if not Replaying then
-				return
-			end
+				if not Replaying then
+					return
+				end
 
-			print("[Replay] Player died.")
-
-			local RecordingToResume =
-				SelectedRecording
-
-			Replaying = false
-
-			if ReplayConnection then
-
-				ReplayConnection:Disconnect()
-				ReplayConnection = nil
-
-			end
-
-			ResetPath()
-
-			UpdateStatus(
-				"Waiting for respawn..."
-			)
-
-			if not RecordingToResume then
-				return
-			end
-
-			ResumeAfterDeath = true
-
-			local NewChar =
-				Player.CharacterAdded:Wait()
-
-			Character = NewChar
-
-			Humanoid =
-				NewChar:WaitForChild("Humanoid")
-
-			RootPart =
-				NewChar:WaitForChild(
-					"HumanoidRootPart"
+				print(
+					"[Replay] Player died."
 				)
 
-			task.wait(0.75)
+				local RecordingToResume =
+					SelectedRecording
 
-			if not ResumeAfterDeath then
-				return
-			end
+				Replaying = false
 
-			ResumeAfterDeath = false
+				if ReplayConnection then
 
-			--================================================
-			-- FIND CLOSEST RECORDED POINT
-			--================================================
+					ReplayConnection:Disconnect()
+					ReplayConnection = nil
 
-			local ClosestIndex = 1
-			local ClosestDistance = math.huge
+				end
 
-			for Index, Point in
-				ipairs(RecordingToResume.Movement)
-			do
+				ResetPath()
 
-				local Distance =
-					(
-						RootPart.Position
-						-
-						Point.Position
-					).Magnitude
+				UpdateStatus(
+					"Waiting for respawn..."
+				)
 
-				if Distance < ClosestDistance then
+				if not RecordingToResume then
+					return
+				end
 
-					ClosestDistance =
-						Distance
+				ResumeAfterDeath = true
 
-					ClosestIndex =
-						Index
+				local NewChar =
+					Player.CharacterAdded:Wait()
+
+				Character = NewChar
+
+				Humanoid =
+					NewChar:WaitForChild(
+						"Humanoid"
+					)
+
+				RootPart =
+					NewChar:WaitForChild(
+						"HumanoidRootPart"
+					)
+
+				task.wait(0.75)
+
+				if not ResumeAfterDeath then
+					return
+				end
+
+				ResumeAfterDeath = false
+
+				--================================================
+				-- FIND CLOSEST RECORDED POINT
+				--================================================
+
+				local ClosestIndex = 1
+				local ClosestDistance = math.huge
+
+				for Index, Point in
+					ipairs(
+						RecordingToResume.Movement
+					)
+				do
+
+					local Distance =
+						(
+							RootPart.Position
+							-
+							Point.Position
+						).Magnitude
+
+					if Distance < ClosestDistance then
+
+						ClosestDistance =
+							Distance
+
+						ClosestIndex =
+							Index
+
+					end
+
+				end
+
+				print(
+					"[Replay] Closest path point:",
+					ClosestIndex
+				)
+
+				print(
+					"[Replay] Distance:",
+					math.floor(
+						ClosestDistance
+					)
+				)
+
+				--================================================
+				-- RESUME REPLAY
+				--================================================
+
+				if
+					ClosestDistance
+					<=
+					MAX_RESUME_DISTANCE
+				then
+
+					StartReplay(
+						RecordingToResume,
+						ClosestIndex
+					)
+
+				else
+
+					UpdateStatus(
+						"Respawn too far from path"
+					)
 
 				end
 
 			end
-
-			print(
-				"[Replay] Closest path point:",
-				ClosestIndex
-			)
-
-			print(
-				"[Replay] Distance:",
-				math.floor(
-					ClosestDistance
-				)
-			)
-
-			--================================================
-			-- RESUME
-			--================================================
-
-			if
-				ClosestDistance
-				<=
-				MAX_RESUME_DISTANCE
-			then
-
-				StartReplay(
-					RecordingToResume,
-					ClosestIndex
-				)
-
-			else
-
-				UpdateStatus(
-					"Respawn too far from path"
-				)
-
-			end
-
-		end)
+		)
 
 end
 
@@ -297,20 +378,24 @@ end
 
 if Player.Character then
 
-	task.spawn(function()
+	task.spawn(
+		function()
 
-		SetupCharacter(
-			Player.Character
-		)
+			SetupCharacter(
+				Player.Character
+			)
 
-	end)
+		end
+	)
 
 end
 
 Player.CharacterAdded:Connect(
 	function(NewCharacter)
 
-		SetupCharacter(NewCharacter)
+		SetupCharacter(
+			NewCharacter
+		)
 
 	end
 )
@@ -319,7 +404,10 @@ Player.CharacterAdded:Connect(
 -- RECORD INPUT
 --========================================================
 
-local function RecordInput(Input, State)
+local function RecordInput(
+	Input,
+	State
+)
 
 	if not Recording then
 		return
@@ -331,16 +419,21 @@ local function RecordInput(Input, State)
 
 	local IsUseful = false
 
-	-- Mouse
+	--====================================================
+	-- MOUSE
+	--====================================================
+
 	if
-		Input.UserInputType ==
+		Input.UserInputType
+		==
 		Enum.UserInputType.MouseButton1
 	then
 
 		IsUseful = true
 
 	elseif
-		Input.UserInputType ==
+		Input.UserInputType
+		==
 		Enum.UserInputType.MouseButton2
 	then
 
@@ -348,7 +441,10 @@ local function RecordInput(Input, State)
 
 	end
 
-	-- Keyboard
+	--====================================================
+	-- KEYBOARD
+	--====================================================
+
 	if
 		Input.KeyCode == Enum.KeyCode.W
 		or Input.KeyCode == Enum.KeyCode.A
@@ -371,6 +467,26 @@ local function RecordInput(Input, State)
 		return
 	end
 
+	--====================================================
+	-- GET EQUIPPED TOOL
+	--====================================================
+
+	local ToolName = nil
+
+	local Tool =
+		GetCurrentSkillTool()
+
+	if Tool then
+
+		ToolName =
+			Tool.Name
+
+	end
+
+	--====================================================
+	-- SAVE INPUT
+	--====================================================
+
 	table.insert(
 		CurrentRecording.Inputs,
 		{
@@ -387,15 +503,28 @@ local function RecordInput(Input, State)
 				Input.UserInputType,
 
 			State =
-				State
+				State,
+
+			-- This is the important part.
+			-- We save which tool was equipped.
+			ToolName =
+				ToolName
 
 		}
+	)
+
+	print(
+		"[Replay Record]",
+		Input.KeyCode,
+		State,
+		"Tool:",
+		ToolName
 	)
 
 end
 
 --========================================================
--- INPUT
+-- INPUT LISTENERS
 --========================================================
 
 UserInputService.InputBegan:Connect(
@@ -475,6 +604,7 @@ local function StartRecording()
 		)
 
 		return
+
 	end
 
 	if not RootPart then
@@ -484,6 +614,7 @@ local function StartRecording()
 		)
 
 		return
+
 	end
 
 	Recording = true
@@ -597,8 +728,8 @@ local function StopRecording()
 
 	CurrentRecording.Duration =
 		os.clock()
-	-
-	RecordStartTime
+		-
+		RecordStartTime
 
 	local Name =
 		NameBox.Text
@@ -637,55 +768,16 @@ local function StopRecording()
 	)
 
 	print(
-		"Movement points:",
+		"[Replay] Movement points:",
 		#CurrentRecording.Movement
 	)
 
 	print(
-		"Inputs:",
+		"[Replay] Inputs:",
 		#CurrentRecording.Inputs
 	)
 
 	CurrentRecording = nil
-
-end
-
---========================================================
--- FIND TOOL
---========================================================
-
-local function FindTool(ToolName)
-
-	local Tool
-
-	if Character then
-
-		Tool =
-			Character:FindFirstChild(
-				ToolName
-			)
-
-	end
-
-	if not Tool then
-
-		local Backpack =
-			Player:FindFirstChild(
-				"Backpack"
-			)
-
-		if Backpack then
-
-			Tool =
-				Backpack:FindFirstChild(
-					ToolName
-				)
-
-		end
-
-	end
-
-	return Tool
 
 end
 
@@ -700,45 +792,56 @@ local function DoAttack()
 	)
 
 	-- weaponUsed
-	pcall(function()
+	pcall(
+		function()
 
-		WeaponUsed:FireServer()
+			WeaponUsed:FireServer()
 
-	end)
+		end
+	)
 
-	-- Spiked Club swing
+	--====================================================
+	-- SPIKED CLUB
+	--====================================================
+
 	local SpikedClub =
 		FindTool(
 			"Spiked Club"
 		)
 
-	if SpikedClub then
+	if not SpikedClub then
 
-		local Swing =
-			SpikedClub:FindFirstChild(
-				"swing"
-			)
+		warn(
+			"[Replay] Spiked Club not found."
+		)
 
-		if Swing then
+		return
 
-			pcall(function()
+	end
+
+	local Swing =
+		SpikedClub:FindFirstChild(
+			"swing"
+		)
+
+	if Swing then
+
+		pcall(
+			function()
 
 				Swing:FireServer()
 
-			end)
+			end
+		)
 
-		else
-
-			warn(
-				"[Replay] Spiked Club swing not found"
-			)
-
-		end
+		print(
+			"[Replay] Spiked Club swing fired."
+		)
 
 	else
 
 		warn(
-			"[Replay] Spiked Club not found"
+			"[Replay] Spiked Club swing RemoteEvent not found."
 		)
 
 	end
@@ -746,105 +849,199 @@ local function DoAttack()
 end
 
 --========================================================
--- ABILITY
+-- USE ABILITY
 --========================================================
 
-local function DoAbility(Key)
+local function DoAbility(
+	Key,
+	ToolName
+)
 
-	local Whirlwind =
-		FindTool(
-			"Whirlwind"
-		)
+	--====================================================
+	-- FIND RECORDED TOOL
+	--====================================================
 
-	if not Whirlwind then
+	local SkillTool = nil
+
+	if ToolName then
+
+		SkillTool =
+			FindTool(
+				ToolName
+			)
+
+	end
+
+	--====================================================
+	-- FALLBACK TO CURRENT EQUIPPED TOOL
+	--====================================================
+
+	if not SkillTool then
+
+		SkillTool =
+			GetCurrentSkillTool()
+
+	end
+
+	if not SkillTool then
 
 		warn(
-			"[Replay] Whirlwind not found"
+			"[Replay] No skill tool found for:",
+			Key,
+			"Recorded tool:",
+			ToolName
 		)
 
 		return
+
 	end
 
+	print(
+		"[Replay] Using skill:",
+		string.upper(Key),
+		"Tool:",
+		SkillTool.Name
+	)
+
+	--====================================================
+	-- ABILITY USED
+	--====================================================
+
+	local AbilitySuccess =
+		pcall(
+			function()
+
+				AbilityUsed:FireServer(
+					Key,
+					SkillTool
+				)
+
+			end
+		)
+
+	if not AbilitySuccess then
+
+		warn(
+			"[Replay] abilityUsed failed."
+		)
+
+	end
+
+	--====================================================
+	-- FIND SPELL EVENT
+	--====================================================
+
 	local SpellEvent =
-		Whirlwind:FindFirstChild(
+		SkillTool:FindFirstChild(
 			"spellEvent"
 		)
 
-	print(
-		"[Replay]",
-		string.upper(Key),
-		"SKILL"
-	)
+	if SpellEvent then
 
-	pcall(function()
+		pcall(
+			function()
 
-		AbilityUsed:FireServer(
-			Key,
-			Whirlwind
+				SpellEvent:FireServer()
+
+			end
 		)
 
-		if SpellEvent then
+		print(
+			"[Replay] Fired spellEvent for:",
+			SkillTool.Name
+		)
 
-			SpellEvent:FireServer()
+	else
 
-		end
+		warn(
+			"[Replay] Tool does not contain spellEvent:",
+			SkillTool.Name
+		)
 
-	end)
+	end
 
 end
 
 --========================================================
--- EXECUTE INPUT
+-- EXECUTE RECORDED INPUT
 --========================================================
 
-local function ExecuteRecordedInput(InputData)
+local function ExecuteRecordedInput(
+	InputData
+)
 
 	if InputData.State ~= "Began" then
 		return
 	end
 
+	--====================================================
 	-- LEFT CLICK
+	--====================================================
+
 	if
-		InputData.UserInputType ==
+		InputData.UserInputType
+		==
 		Enum.UserInputType.MouseButton1
 	then
 
 		DoAttack()
 
 		return
+
 	end
 
+	--====================================================
 	-- Q
+	--====================================================
+
 	if
-		InputData.KeyCode ==
+		InputData.KeyCode
+		==
 		Enum.KeyCode.Q
 	then
 
-		DoAbility("q")
+		DoAbility(
+			"q",
+			InputData.ToolName
+		)
 
 		return
+
 	end
 
+	--====================================================
 	-- E
+	--====================================================
+
 	if
-		InputData.KeyCode ==
+		InputData.KeyCode
+		==
 		Enum.KeyCode.E
 	then
 
-		DoAbility("e")
+		DoAbility(
+			"e",
+			InputData.ToolName
+		)
 
 		return
+
 	end
 
+	--====================================================
 	-- SPACE
+	--====================================================
+
 	if
-		InputData.KeyCode ==
+		InputData.KeyCode
+		==
 		Enum.KeyCode.Space
 	then
 
 		if Humanoid then
 
-			Humanoid.Jump = true
+			Humanoid.Jump =
+				true
 
 		end
 
@@ -856,7 +1053,9 @@ end
 -- CREATE PATH
 --========================================================
 
-local function CreatePathTo(TargetPosition)
+local function CreatePathTo(
+	TargetPosition
+)
 
 	if not RootPart then
 		return false
@@ -866,30 +1065,50 @@ local function CreatePathTo(TargetPosition)
 		return false
 	end
 
+	-- Prevent excessive path calculations
+	if
+		os.clock()
+		-
+		LastPathCalculation
+		<
+		PATH_RECALCULATE_TIME
+	then
+
+		return false
+
+	end
+
+	LastPathCalculation =
+		os.clock()
+
 	local Path =
-		PathfindingService:CreatePath({
+		PathfindingService:CreatePath(
+			{
 
-			AgentRadius = 2,
+				AgentRadius = 2,
 
-			AgentHeight = 5,
+				AgentHeight = 5,
 
-			AgentCanJump = true,
+				AgentCanJump = true,
 
-			AgentCanClimb = true,
+				AgentCanClimb = true,
 
-			WaypointSpacing = 3
+				WaypointSpacing = 3
 
-		})
+			}
+		)
 
 	local Success, Error =
-		pcall(function()
+		pcall(
+			function()
 
-			Path:ComputeAsync(
-				RootPart.Position,
-				TargetPosition
-			)
+				Path:ComputeAsync(
+					RootPart.Position,
+					TargetPosition
+				)
 
-		end)
+			end
+		)
 
 	if not Success then
 
@@ -909,7 +1128,7 @@ local function CreatePathTo(TargetPosition)
 	then
 
 		warn(
-			"[Replay] Could not find path."
+			"[Replay] No valid path found."
 		)
 
 		return false
@@ -934,13 +1153,10 @@ local function CreatePathTo(TargetPosition)
 	LastPathTarget =
 		TargetPosition
 
-	LastPathCalculation =
-		os.clock()
-
 	print(
-		"[Replay] Path generated:",
+		"[Replay] Generated path with",
 		#Waypoints,
-		"points"
+		"waypoints."
 	)
 
 	return true
@@ -948,10 +1164,12 @@ local function CreatePathTo(TargetPosition)
 end
 
 --========================================================
--- MOVE USING PATHFINDING
+-- MOVE TO RECORDED POINT
 --========================================================
 
-local function MoveToRecordedPoint(TargetPosition)
+local function MoveToRecordedPoint(
+	TargetPosition
+)
 
 	if not Humanoid then
 		return false
@@ -962,7 +1180,7 @@ local function MoveToRecordedPoint(TargetPosition)
 	end
 
 	--====================================================
-	-- DIRECT DISTANCE
+	-- DISTANCE TO TARGET
 	--====================================================
 
 	local Difference =
@@ -993,45 +1211,7 @@ local function MoveToRecordedPoint(TargetPosition)
 	end
 
 	--====================================================
-	-- CHECK IF WE NEED A NEW PATH
-	--====================================================
-
-	local NeedNewPath = false
-
-	if not CurrentPath then
-
-		NeedNewPath = true
-
-	elseif not LastPathTarget then
-
-		NeedNewPath = true
-
-	elseif
-		(
-			LastPathTarget
-			-
-			TargetPosition
-		).Magnitude
-		>
-		5
-	then
-
-		NeedNewPath = true
-
-	elseif
-		os.clock()
-		-
-		LastPathCalculation
-		>
-		PATH_RECALCULATE_TIME
-	then
-
-		NeedNewPath = true
-
-	end
-
-	--====================================================
-	-- STUCK DETECTION
+	-- STUCK CHECK
 	--====================================================
 
 	if LastPosition then
@@ -1074,23 +1254,54 @@ local function MoveToRecordedPoint(TargetPosition)
 
 	end
 
+	--====================================================
+	-- PATH NEEDED?
+	--====================================================
+
+	local NeedPath = false
+
+	if not CurrentPath then
+
+		NeedPath = true
+
+	elseif not LastPathTarget then
+
+		NeedPath = true
+
+	elseif
+		(
+			LastPathTarget
+			-
+			TargetPosition
+		).Magnitude
+		>
+		5
+	then
+
+		NeedPath = true
+
+	end
+
 	if StuckTimer >= STUCK_TIME then
 
 		print(
-			"[Replay] Character stuck - recalculating path."
+			"[Replay] Stuck. Recalculating path."
 		)
 
-		NeedNewPath = true
+		CurrentPath = nil
+		CurrentPathIndex = 1
+
+		NeedPath = true
 
 		StuckTimer = 0
 
 	end
 
 	--====================================================
-	-- GENERATE PATH
+	-- CREATE PATH
 	--====================================================
 
-	if NeedNewPath then
+	if NeedPath then
 
 		CreatePathTo(
 			TargetPosition
@@ -1099,7 +1310,7 @@ local function MoveToRecordedPoint(TargetPosition)
 	end
 
 	--====================================================
-	-- USE GENERATED PATH
+	-- FOLLOW PATH
 	--====================================================
 
 	if
@@ -1110,39 +1321,37 @@ local function MoveToRecordedPoint(TargetPosition)
 		#CurrentPath
 	then
 
-		local PathWaypoint =
+		local Waypoint =
 			CurrentPath[
 				CurrentPathIndex
 			]
 
-		-- Jump when path requires it
+		-- Jump if necessary
 		if
-			PathWaypoint.Action
+			Waypoint.Action
 			==
 			Enum.PathWaypointAction.Jump
 		then
 
-			Humanoid.Jump = true
+			Humanoid.Jump =
+				true
 
 		end
 
-		local PathPosition =
-			PathWaypoint.Position
-
-		local PathDifference =
-			PathPosition
+		local WaypointDifference =
+			Waypoint.Position
 			-
 			RootPart.Position
 
-		local PathHorizontal =
+		local WaypointHorizontal =
 			Vector3.new(
-				PathDifference.X,
+				WaypointDifference.X,
 				0,
-				PathDifference.Z
+				WaypointDifference.Z
 			)
 
 		if
-			PathHorizontal.Magnitude
+			WaypointHorizontal.Magnitude
 			<=
 			PATH_POINT_DISTANCE
 		then
@@ -1151,24 +1360,17 @@ local function MoveToRecordedPoint(TargetPosition)
 
 		else
 
-			--================================================
-			-- ACTUAL PHYSICAL MOVEMENT
-			--================================================
-
 			Humanoid:MoveTo(
-				PathPosition
+				Waypoint.Position
 			)
 
 		end
 
 	else
 
-		--====================================================
-		-- FALLBACK
-		--====================================================
-
-		-- If Pathfinding can't find anything,
-		-- still attempt normal walking.
+		--================================================
+		-- FALLBACK TO NORMAL MOVEMENT
+		--================================================
 
 		Humanoid:MoveTo(
 			Vector3.new(
@@ -1212,6 +1414,7 @@ function StartReplay(
 		)
 
 		return
+
 	end
 
 	if not Humanoid or not RootPart then
@@ -1221,6 +1424,7 @@ function StartReplay(
 		)
 
 		return
+
 	end
 
 	if ReplayConnection then
@@ -1248,6 +1452,7 @@ function StartReplay(
 	if not StartPoint then
 
 		Replaying = false
+
 		return
 
 	end
@@ -1258,11 +1463,11 @@ function StartReplay(
 
 	ReplayStartTime =
 		os.clock()
-	-
-	StartPoint.Time
+		-
+		StartPoint.Time
 
 	--====================================================
-	-- INPUT INDEX
+	-- FIND INPUT START
 	--====================================================
 
 	ReplayInputIndex = 1
@@ -1309,7 +1514,7 @@ function StartReplay(
 				end
 
 				--================================================
-				-- TIME
+				-- REPLAY TIME
 				--================================================
 
 				local ReplayTime =
@@ -1318,7 +1523,7 @@ function StartReplay(
 					ReplayStartTime
 
 				--================================================
-				-- INPUTS
+				-- REPLAY INPUTS
 				--================================================
 
 				while
@@ -1402,7 +1607,9 @@ function StartReplay(
 	)
 
 	print(
-		"[Replay] Started with pathfinding."
+		"[Replay] Started:"
+		,
+		RecordingToPlay.Name
 	)
 
 end
@@ -1444,7 +1651,7 @@ function StopReplay()
 end
 
 --========================================================
--- UI
+-- CREATE UI
 --========================================================
 
 ScreenGui =
@@ -1497,16 +1704,16 @@ MainFrame.BorderSizePixel =
 MainFrame.Parent =
 	ScreenGui
 
-local Corner =
+local MainCorner =
 	Instance.new("UICorner")
 
-Corner.CornerRadius =
+MainCorner.CornerRadius =
 	UDim.new(
 		0,
 		8
 	)
 
-Corner.Parent =
+MainCorner.Parent =
 	MainFrame
 
 --========================================================
@@ -1979,7 +2186,9 @@ function UpdateDropdown()
 	do
 
 		if Child:IsA("TextButton") then
+
 			Child:Destroy()
+
 		end
 
 	end
@@ -1987,7 +2196,9 @@ function UpdateDropdown()
 	local Y = 0
 
 	for _, Recording in
-		ipairs(Recordings)
+		ipairs(
+			Recordings
+		)
 	do
 
 		local Button =
@@ -2197,7 +2408,8 @@ Header.InputBegan:Connect(
 	function(Input)
 
 		if
-			Input.UserInputType ==
+			Input.UserInputType
+			==
 			Enum.UserInputType.MouseButton1
 		then
 
@@ -2218,7 +2430,8 @@ Header.InputEnded:Connect(
 	function(Input)
 
 		if
-			Input.UserInputType ==
+			Input.UserInputType
+			==
 			Enum.UserInputType.MouseButton1
 		then
 
@@ -2237,7 +2450,8 @@ UserInputService.InputChanged:Connect(
 		end
 
 		if
-			Input.UserInputType ~=
+			Input.UserInputType
+			~=
 			Enum.UserInputType.MouseMovement
 		then
 
@@ -2275,13 +2489,13 @@ UserInputService.InputChanged:Connect(
 --========================================================
 
 print("==========================================")
-print("       REPLAY SYSTEM LOADED")
+print("         REPLAY SYSTEM LOADED")
 print("==========================================")
 print("Movement       : Humanoid:MoveTo")
 print("Pathfinding    : ENABLED")
 print("Teleporting    : NONE")
-print("Attack         : weaponUsed + Spiked Club swing")
-print("Q              : abilityUsed + spellEvent")
-print("E              : abilityUsed + spellEvent")
+print("Attack         : weaponUsed + Spiked Club")
+print("Q/E            : Dynamic equipped skill")
+print("Skill Tool     : Recorded")
 print("Death Resume   : ENABLED")
 print("==========================================")
