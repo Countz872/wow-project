@@ -1,4 +1,4 @@
---// Replay System v2.5.0
+--// Replay System v2.7.0
 --// Cloudflare D1 recording sync integration
 --// Compact Mobile UI
 --// Multiple Recordings + Mouse/Touch Dragging
@@ -16,10 +16,13 @@ local PathfindingService = game:GetService("PathfindingService")
 -- This version talks to Cloudflare directly from the LocalScript.
 -- This is convenient for testing, but the API key is visible to the client.
 -- For a public game, use a server-side proxy instead.
-local CLOUDFLARE_WORKER_URL = "https://project-replay.meijio12115.workers.dev/"
+local CLOUDFLARE_WORKER_URL = "https://project-replay.meijio12115.workers.dev"
 local CLOUDFLARE_API_KEY = "ProjectReplay_2026_x8Kp92LmQ7vT4z"
 local CLOUDFLARE_SAVE_PATH = "/api/replay/save"
-local CLOUDFLARE_LOAD_PATH = "/api/replay/load/"
+local CLOUDFLARE_LOAD_PATH = "/api/replay/load"
+
+-- Normalize the Worker URL so a trailing slash never creates //api/... URLs.
+CLOUDFLARE_WORKER_URL = CLOUDFLARE_WORKER_URL:gsub("/+$", "")
 
 
 local Player = Players.LocalPlayer
@@ -264,7 +267,7 @@ end
 -- CONFIG
 --------------------------------------------------
 
-local VERSION = "v2.2.0"
+local VERSION = "v2.7.0"
 
 local RECORD_INTERVAL = 0.05
 
@@ -332,6 +335,8 @@ local SelectedRecording = nil
 
 local CloudBusy = false
 local CloudLoaded = false
+local CloudLoadFailed = false
+local CloudSavePending = false
 local CloudStatus = "Cloud: not loaded"
 local CloudUIRefresh = function() end
 
@@ -442,8 +447,10 @@ local function GetRequestFunction()
 end
 
 local function CloudRequest(Method, Url, Body)
-	if CLOUDFLARE_WORKER_URL:find("YOUR%-WORKER", 1, false) then
-		return false, "Set CLOUDFLARE_WORKER_URL first"
+	if CLOUDFLARE_WORKER_URL == ""
+		or CLOUDFLARE_WORKER_URL:find("YOUR%-SUBDOMAIN", 1, false)
+		or CLOUDFLARE_WORKER_URL:find("YOUR%-WORKER", 1, false) then
+		return false, "Set CLOUDFLARE_WORKER_URL to your real project-replay Worker URL"
 	end
 
 	if CLOUDFLARE_API_KEY == "" or CLOUDFLARE_API_KEY == "PUT_YOUR_API_KEY_HERE" then
@@ -458,6 +465,7 @@ local function CloudRequest(Method, Url, Body)
 	local headers = {
 		["Content-Type"] = "application/json",
 		["Authorization"] = "Bearer " .. CLOUDFLARE_API_KEY,
+		["X-API-Key"] = CLOUDFLARE_API_KEY,
 	}
 
 	local requestData = {
@@ -504,9 +512,17 @@ local function CloudRequest(Method, Url, Body)
 end
 
 local function SaveCloud(force)
-	if not AutoSave and not force then return end
-	if CloudBusy then return end
+	if not AutoSave and not force then
+		return
+	end
+
+	if CloudBusy then
+		CloudSavePending = true
+		return
+	end
+
 	CloudBusy = true
+	CloudSavePending = false
 
 	task.spawn(function()
 		local HttpService = game:GetService("HttpService")
@@ -548,11 +564,20 @@ local function SaveCloud(force)
 
 		CloudBusy = false
 		CloudUIRefresh()
+
+		-- If a recording/settings change happened while the previous request was
+		-- in progress, immediately send the newest state too.
+		if CloudSavePending then
+			CloudSavePending = false
+			SaveCloud(true)
+		end
 	end)
 end
 
 local function LoadCloud()
 	if CloudBusy then return end
+	CloudLoadFailed = false
+	CloudLoaded = false
 	CloudBusy = true
 
 	task.spawn(function()
@@ -576,22 +601,26 @@ local function LoadCloud()
 			if settings.autoReplay ~= nil then AutoReplay = settings.autoReplay == true end
 			if settings.autoSave ~= nil then AutoSave = settings.autoSave == true end
 
+			SelectedRecording = nil
 			if #Recordings > 0 then
 				SelectedRecording = Recordings[1]
 			end
 
 			CloudLoaded = true
+			CloudLoadFailed = false
 			CloudStatus = "Cloud: loaded " .. tostring(#Recordings) .. " recordings"
 			CloudUIRefresh()
 			print("[Replay] Cloud load successful:", #Recordings, "recordings")
 		elseif ok and result and result.success and not result.found then
 			Recordings = {}
 			CloudLoaded = true
+			CloudLoadFailed = false
 			CloudStatus = "Cloud: no saved data"
 			CloudUIRefresh()
 			print("[Replay] No cloud replay data found for this player")
 		else
-			CloudStatus = "Cloud: load failed"
+			CloudLoadFailed = true
+			CloudStatus = "Cloud: load failed - automation paused"
 			warn("[Replay] Cloud load failed:", result)
 		end
 
@@ -3825,7 +3854,8 @@ AutoStartButton.MouseButton1Click:Connect(function()
 		FireAutoStart()
 	end
 	UpdateDungeonButtons()
-	SaveCloud(false)
+	-- Settings must be cloud-persistent even when Cloud Auto Save is OFF.
+	SaveCloud(true)
 end)
 
 AutoReplayButton.MouseButton1Click:Connect(function()
@@ -3834,7 +3864,8 @@ AutoReplayButton.MouseButton1Click:Connect(function()
 		LastAutoReplayKey = nil
 	end
 	UpdateDungeonButtons()
-	SaveCloud(false)
+	-- Settings must be cloud-persistent even when Cloud Auto Save is OFF.
+	SaveCloud(true)
 end)
 
 local AutoSaveButton = CreateButton(
@@ -3879,8 +3910,10 @@ CloudUIRefresh = function()
 	UpdateUI()
 end
 
--- Automatically restore cloud recordings after the UI is initialized.
-task.delay(1.5, function()
+-- Automatically restore cloud recordings/settings every time the script starts.
+-- The dungeon automation loop is blocked until this finishes, so saved OFF
+-- settings cannot be overwritten by the local defaults.
+task.delay(0.25, function()
 	if not CloudLoaded then
 		LoadCloud()
 	end
@@ -4354,6 +4387,19 @@ ReplayButton.MouseButton1Click:Connect(
 
 task.spawn(function()
 	while true do
+		-- NEVER run auto-start/auto-replay until the cloud settings have loaded.
+		-- This prevents the LocalScript defaults from firing before the saved
+		-- Auto Start / Auto Replay values arrive from Cloudflare.
+		if not CloudLoaded then
+			task.wait(DUNGEON_SCAN_INTERVAL)
+			continue
+		end
+
+		if CloudLoadFailed then
+			task.wait(DUNGEON_SCAN_INTERVAL)
+			continue
+		end
+
 		local State = GetDungeonState()
 
 		local Name = State.dungeonName
