@@ -1,4 +1,4 @@
---// Replay System v2.7.0
+--// Replay System v2.8.0
 --// Cloudflare D1 recording sync integration
 --// Compact Mobile UI
 --// Multiple Recordings + Mouse/Touch Dragging
@@ -179,6 +179,7 @@ local function GetDungeonState()
 end
 
 local function FireAutoStart()
+                AutoStartCompletedAt = os.clock()
 	local Now = os.clock()
 
 	if Now - LastAutoStartFire < AUTO_START_COOLDOWN then
