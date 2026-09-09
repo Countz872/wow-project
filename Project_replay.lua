@@ -1,4 +1,4 @@
---// Replay System v2.8.0
+--// Replay System v2.9.0
 --// Cloudflare D1 recording sync integration
 --// Compact Mobile UI
 --// Multiple Recordings + Mouse/Touch Dragging
@@ -46,11 +46,15 @@ local ReplayDungeon = Remotes:WaitForChild("replayDungeon")
 
 local AutoStart = true
 local AutoReplay = true
+local AutoReplayRecording = true
 local AutoSave = true
 
 local LastAutoStartFire = 0
 local LastAutoReplayKey = nil
+local AutoStartPending = false
+local AutoReplayRecordingAt = nil
 local AUTO_START_COOLDOWN = 3
+local AUTO_REPLAY_RECORDING_DELAY = 6
 local DUNGEON_SCAN_INTERVAL = 0.35
 
 local DungeonState = {
@@ -179,7 +183,6 @@ local function GetDungeonState()
 end
 
 local function FireAutoStart()
-                AutoStartCompletedAt = os.clock()
 	local Now = os.clock()
 
 	if Now - LastAutoStartFire < AUTO_START_COOLDOWN then
@@ -192,7 +195,19 @@ local function FireAutoStart()
 
 	if Success then
 		LastAutoStartFire = Now
+		AutoStartPending = true
+
+		-- Saved-recording Auto Replay is intentionally separate from the
+		-- dungeon replayDungeon automation. It starts exactly 6 seconds
+		-- after Auto Start successfully fires.
+		if AutoReplayRecording then
+			AutoReplayRecordingAt = Now + AUTO_REPLAY_RECORDING_DELAY
+		end
+
 		print("[Replay] Auto Start -> changeStartValue")
+		if AutoReplayRecording then
+			print("[Replay] Auto Replay Recording scheduled in 6 seconds")
+		end
 	else
 		warn("[Replay] Auto Start error:", ErrorMessage)
 	end
@@ -419,6 +434,7 @@ local function BuildCloudPayload()
 		settings = {
 			autoStart = AutoStart,
 			autoReplay = AutoReplay,
+			autoReplayRecording = AutoReplayRecording,
 			autoSave = AutoSave,
 			qSkill = QSkillName,
 			eSkill = ESkillName,
@@ -600,6 +616,7 @@ local function LoadCloud()
 			if settings.eSkill then ESkillName = tostring(settings.eSkill) end
 			if settings.autoStart ~= nil then AutoStart = settings.autoStart == true end
 			if settings.autoReplay ~= nil then AutoReplay = settings.autoReplay == true end
+			if settings.autoReplayRecording ~= nil then AutoReplayRecording = settings.autoReplayRecording == true end
 			if settings.autoSave ~= nil then AutoSave = settings.autoSave == true end
 
 			SelectedRecording = nil
@@ -3800,7 +3817,7 @@ local ReplayButton =
 --------------------------------------------------
 
 local DungeonSection = Instance.new("Frame")
-DungeonSection.Size = UDim2.new(1, -2, 0, 155)
+DungeonSection.Size = UDim2.new(1, -2, 0, 194)
 DungeonSection.BackgroundColor3 = PANEL
 DungeonSection.LayoutOrder = 3
 DungeonSection.Parent = Content
@@ -3841,18 +3858,26 @@ local AutoReplayButton = CreateButton(
 	GREEN
 )
 
+local AutoReplayRecordingButton
+
 local function UpdateDungeonButtons()
 	AutoStartButton.Text = AutoStart and "Auto Start: ON" or "Auto Start: OFF"
 	AutoStartButton.BackgroundColor3 = AutoStart and GREEN or Color3.fromRGB(60, 60, 65)
-	AutoReplayButton.Text = AutoReplay and "Auto Replay: ON" or "Auto Replay: OFF"
+	AutoReplayButton.Text = AutoReplay and "Dungeon Auto Replay: ON" or "Dungeon Auto Replay: OFF"
 	AutoReplayButton.BackgroundColor3 = AutoReplay and GREEN or Color3.fromRGB(60, 60, 65)
+	AutoReplayRecordingButton.Text = AutoReplayRecording and "Auto Replay Recording: ON" or "Auto Replay Recording: OFF"
+	AutoReplayRecordingButton.BackgroundColor3 = AutoReplayRecording and GREEN or Color3.fromRGB(60, 60, 65)
 end
 
 AutoStartButton.MouseButton1Click:Connect(function()
 	AutoStart = not AutoStart
 	if AutoStart then
 		LastAutoStartFire = 0
+		AutoStartPending = false
 		FireAutoStart()
+	else
+		AutoStartPending = false
+		AutoReplayRecordingAt = nil
 	end
 	UpdateDungeonButtons()
 	-- Settings must be cloud-persistent even when Cloud Auto Save is OFF.
@@ -3869,11 +3894,29 @@ AutoReplayButton.MouseButton1Click:Connect(function()
 	SaveCloud(true)
 end)
 
+AutoReplayRecordingButton = CreateButton(
+	DungeonSection,
+	"Auto Replay Recording: ON",
+	UDim2.new(0.5, -15, 0, 31),
+	UDim2.fromOffset(10, 87),
+	GREEN
+)
+
+AutoReplayRecordingButton.MouseButton1Click:Connect(function()
+	AutoReplayRecording = not AutoReplayRecording
+	if not AutoReplayRecording then
+		AutoReplayRecordingAt = nil
+	end
+	UpdateDungeonButtons()
+	-- Persist this setting independently of the Cloud Auto Save toggle.
+	SaveCloud(true)
+end)
+
 local AutoSaveButton = CreateButton(
 	DungeonSection,
 	"Cloud Auto Save: ON",
 	UDim2.new(0.5, -15, 0, 31),
-	UDim2.fromOffset(10, 87),
+	UDim2.new(0.5, 5, 0, 87),
 	GREEN
 )
 
@@ -3881,7 +3924,7 @@ local CloudLoadButton = CreateButton(
 	DungeonSection,
 	"Load Cloud",
 	UDim2.new(0.5, -15, 0, 31),
-	UDim2.new(0.5, 5, 0, 87),
+	UDim2.fromOffset(10, 126),
 	BLUE
 )
 
@@ -4415,12 +4458,44 @@ task.spawn(function()
 			tostring(State.dungeonStarted == true)
 		)
 
-		if AutoStart and State.dungeonStarted ~= true then
+		-- A successful Auto Start is one-shot for this dungeon-start cycle.
+		-- This prevents the 0.35s scanner from repeatedly scheduling the
+		-- saved-recording replay while dungeonStarted is still updating.
+		if State.dungeonStarted == true then
+			AutoStartPending = false
+		end
+
+		if AutoStart and State.dungeonStarted ~= true and not AutoStartPending then
 			FireAutoStart()
 		end
 
 		if AutoReplay then
 			FireAutoReplay(State)
+		end
+
+		-- Separate feature: replay the selected saved recording 6 seconds
+		-- after Auto Start. This never calls replayDungeon.
+		if AutoReplayRecording and AutoReplayRecordingAt then
+			local Now = os.clock()
+			if Now >= AutoReplayRecordingAt then
+				if IsReplaying then
+					-- Something is already replaying, so don't start a second replay.
+					AutoReplayRecordingAt = nil
+				elseif not IsRecording then
+					if not SelectedRecording and #Recordings > 0 then
+						SelectedRecording = Recordings[1]
+					end
+
+					if SelectedRecording and SelectedRecording.Movement and #SelectedRecording.Movement > 0 then
+						print("[Replay] Auto Replay Recording ->", tostring(SelectedRecording.Name))
+						StartReplay()
+						AutoReplayRecordingAt = nil
+					else
+						warn("[Replay] Auto Replay Recording: no saved recording available")
+						AutoReplayRecordingAt = nil
+					end
+				end
+			end
 		end
 
 		task.wait(DUNGEON_SCAN_INTERVAL)
