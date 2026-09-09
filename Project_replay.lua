@@ -1,4 +1,4 @@
---// Replay System v3.0.0
+--// Replay System v3.1.0
 --// Cloudflare D1 recording sync integration
 --// Compact Mobile UI
 --// Multiple Recordings + Mouse/Touch Dragging
@@ -3446,10 +3446,127 @@ local function FormatTime(Time)
 end
 
 --------------------------------------------------
--- REFRESH RECORDING LIST
+-- DELETE RECORDING CONFIRMATION
 --------------------------------------------------
 
 local UpdateAutoReplayCurrentButton
+local RefreshAutoReplayDropdown
+
+local DeleteConfirmFrame = Instance.new("Frame")
+DeleteConfirmFrame.Size = UDim2.fromOffset(290, 145)
+DeleteConfirmFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+DeleteConfirmFrame.Position = UDim2.fromScale(0.5, 0.5)
+DeleteConfirmFrame.BackgroundColor3 = PANEL
+DeleteConfirmFrame.BorderSizePixel = 0
+DeleteConfirmFrame.Visible = false
+DeleteConfirmFrame.ZIndex = 100
+DeleteConfirmFrame.Parent = ScreenGui
+AddCorner(DeleteConfirmFrame, 10)
+AddStroke(DeleteConfirmFrame, RED, 0.15)
+
+local DeleteConfirmTitle = CreateLabel(
+	DeleteConfirmFrame,
+	"Delete Recording?",
+	UDim2.new(1, -24, 0, 24),
+	UDim2.fromOffset(12, 12),
+	14,
+	TEXT
+)
+DeleteConfirmTitle.Font = Enum.Font.GothamBold
+DeleteConfirmTitle.ZIndex = 101
+
+local DeleteConfirmText = CreateLabel(
+	DeleteConfirmFrame,
+	"Are you sure you want to delete this recording?",
+	UDim2.new(1, -24, 0, 42),
+	UDim2.fromOffset(12, 40),
+	9,
+	SUBTEXT
+)
+DeleteConfirmText.TextWrapped = true
+DeleteConfirmText.ZIndex = 101
+
+local DeleteConfirmCancel = CreateButton(
+	DeleteConfirmFrame,
+	"Cancel",
+	UDim2.fromOffset(124, 31),
+	UDim2.fromOffset(12, 101),
+	INPUT
+)
+DeleteConfirmCancel.ZIndex = 101
+
+local DeleteConfirmYes = CreateButton(
+	DeleteConfirmFrame,
+	"Delete",
+	UDim2.fromOffset(124, 31),
+	UDim2.fromOffset(154, 101),
+	RED
+)
+DeleteConfirmYes.ZIndex = 101
+
+local PendingDeleteRecording = nil
+
+local function CloseDeleteConfirmation()
+	PendingDeleteRecording = nil
+	DeleteConfirmFrame.Visible = false
+end
+
+local function OpenDeleteConfirmation(Recording)
+	if not Recording then
+		return
+	end
+
+	PendingDeleteRecording = Recording
+	DeleteConfirmTitle.Text = "Delete Recording?"
+	DeleteConfirmText.Text = 'Are you sure you want to delete "' .. tostring(Recording.Name) .. '"? This cannot be undone.'
+	DeleteConfirmFrame.Visible = true
+end
+
+DeleteConfirmCancel.MouseButton1Click:Connect(CloseDeleteConfirmation)
+
+DeleteConfirmYes.MouseButton1Click:Connect(function()
+	local Recording = PendingDeleteRecording
+	CloseDeleteConfirmation()
+
+	if not Recording then
+		return
+	end
+
+	for Index, SavedRecording in ipairs(Recordings) do
+		if SavedRecording == Recording then
+			table.remove(Recordings, Index)
+			break
+		end
+	end
+
+	-- Keep both recording selectors valid after deletion.
+	if SelectedRecording == Recording then
+		SelectedRecording = Recordings[1]
+	end
+
+	if AutoReplayRecordingName and tostring(AutoReplayRecordingName) == tostring(Recording.Name) then
+		AutoReplayRecordingName = nil
+		AutoReplayRecordingAt = nil
+	end
+
+	RefreshRecordingList()
+	if RefreshAutoReplayDropdown then
+		RefreshAutoReplayDropdown()
+	end
+	if UpdateAutoReplayCurrentButton then
+		UpdateAutoReplayCurrentButton()
+	end
+	UpdateUI()
+
+	-- Force the deletion to cloud immediately, even if Cloud Auto Save is OFF.
+	SaveCloud(true)
+
+	print("[Replay] Deleted recording:", tostring(Recording.Name))
+end)
+
+--------------------------------------------------
+-- REFRESH RECORDING LIST
+--------------------------------------------------
 
 local function RefreshRecordingList()
 
@@ -3692,6 +3809,29 @@ local function RefreshRecordingList()
 		end
 
 		--------------------------------------------------
+		-- DELETE
+		--------------------------------------------------
+
+		local DeleteButton = Instance.new("TextButton")
+		DeleteButton.Size = UDim2.fromOffset(32, 32)
+		DeleteButton.Position = UDim2.new(1, -37, 0, 6)
+		DeleteButton.BackgroundColor3 = Color3.fromRGB(75, 35, 35)
+		DeleteButton.TextColor3 = TEXT
+		DeleteButton.Font = Enum.Font.GothamBold
+		DeleteButton.TextSize = 12
+		DeleteButton.Text = "×"
+		DeleteButton.ZIndex = 11
+		DeleteButton.Parent = Row
+		AddCorner(DeleteButton, 5)
+
+		DeleteButton.MouseButton1Click:Connect(function()
+			if IsRecording or IsReplaying then
+				return
+			end
+			OpenDeleteConfirmation(Recording)
+		end)
+
+		--------------------------------------------------
 		-- CLICK
 		--------------------------------------------------
 
@@ -3703,7 +3843,7 @@ local function RefreshRecordingList()
 		Click.Size =
 			UDim2.new(
 				1,
-				0,
+				-42,
 				1,
 				0
 			)
@@ -3800,7 +3940,7 @@ UpdateAutoReplayCurrentButton = function()
 	end
 end
 
-local function RefreshAutoReplayDropdown()
+RefreshAutoReplayDropdown = function()
 	for _, Child in ipairs(AutoReplayDropdownList:GetChildren()) do
 		if Child:IsA("TextButton") then
 			Child:Destroy()
