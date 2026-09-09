@@ -59,18 +59,57 @@ local function ReadValueObject(Object)
 end
 
 local function FindDungeonField(FieldName)
+	-- Exact locations discovered by DungeonStateFinder.
+	local ExactObjects = {
+		dungeonStarted = workspace:FindFirstChild("dungeonStarted"),
+		dungeonProgress = workspace:FindFirstChild("dungeonProgress"),
+		dungeonName = workspace:FindFirstChild("dungeonName"),
+		hardcore = workspace:FindFirstChild("hardcore"),
+		dungeonFinished = nil,
+		fightingBoss = nil
+	}
+
+	local DungeonFolder = workspace:FindFirstChild("dungeon")
+	local BossRoom = DungeonFolder and DungeonFolder:FindFirstChild("bossRoom")
+
+	if BossRoom then
+		ExactObjects.dungeonFinished = BossRoom:FindFirstChild("dungeonFinished")
+		ExactObjects.fightingBoss = BossRoom:FindFirstChild("fightingBoss")
+	end
+
+	local Exact = ExactObjects[FieldName]
+
+	if Exact then
+		local Value = ReadValueObject(Exact)
+		if Value ~= nil then
+			return Value
+		end
+
+		local Success, Attribute = pcall(function()
+			return Exact:GetAttribute(FieldName)
+		end)
+
+		if Success and Attribute ~= nil then
+			return Attribute
+		end
+	end
+
+	-- Fallback for recreated/moved replicated objects.
 	local Containers = {
+		workspace,
 		Player,
 		Player:FindFirstChild("PlayerGui"),
 		Character,
-		workspace,
 		ReplicatedStorage
 	}
 
 	for _, Container in ipairs(Containers) do
 		if Container then
-			local Attribute = Container:GetAttribute(FieldName)
-			if Attribute ~= nil then
+			local Success, Attribute = pcall(function()
+				return Container:GetAttribute(FieldName)
+			end)
+
+			if Success and Attribute ~= nil then
 				return Attribute
 			end
 
@@ -79,6 +118,14 @@ local function FindDungeonField(FieldName)
 				local Value = ReadValueObject(Direct)
 				if Value ~= nil then
 					return Value
+				end
+
+				local AttributeSuccess, AttributeValue = pcall(function()
+					return Direct:GetAttribute(FieldName)
+				end)
+
+				if AttributeSuccess and AttributeValue ~= nil then
+					return AttributeValue
 				end
 			end
 		end
@@ -98,9 +145,17 @@ local function GetDungeonState()
 	State.isHardcore = FindDungeonField("isHardcore")
 	State.fightingBoss = FindDungeonField("fightingBoss")
 
-	if State.hardcore == nil then State.hardcore = false end
-	if State.isHardcore == nil then State.isHardcore = State.hardcore end
-	if State.fightingBoss == nil then State.fightingBoss = true end
+	if State.hardcore == nil then
+		State.hardcore = false
+	end
+
+	if State.isHardcore == nil then
+		State.isHardcore = State.hardcore
+	end
+
+	if State.fightingBoss == nil then
+		State.fightingBoss = true
+	end
 
 	DungeonState = State
 	return State
@@ -108,6 +163,7 @@ end
 
 local function FireAutoStart()
 	local Now = os.clock()
+
 	if Now - LastAutoStartFire < AUTO_START_COOLDOWN then
 		return
 	end
@@ -125,29 +181,58 @@ local function FireAutoStart()
 end
 
 local function FireAutoReplay(State)
-	if State.dungeonProgress ~= "bossKilled" then
+	local Progress = tostring(State.dungeonProgress or "")
+
+	-- Only fire when the actual discovered Workspace.dungeonProgress says bossKilled.
+	-- Reset the one-shot lock after progress changes so the same dungeon can replay again.
+	if Progress ~= "bossKilled" then
+		LastAutoReplayKey = nil
 		return
 	end
 
 	local DungeonName = State.dungeonName
 	if DungeonName == nil or tostring(DungeonName) == "" then
-		DungeonName = "Unknown Dungeon"
+		warn("[Replay] bossKilled detected, but Workspace.dungeonName is empty.")
+		return
 	end
 
-	local ReplayKey = tostring(DungeonName) .. "|bossKilled"
+	DungeonName = tostring(DungeonName)
+
+	local Hardcore = State.hardcore == true
+	local ReplayKey = DungeonName .. "|bossKilled|" .. tostring(Hardcore)
+
 	if LastAutoReplayKey == ReplayKey then
 		return
 	end
 
+	local DungeonStarted = State.dungeonStarted
+	if DungeonStarted == nil then DungeonStarted = true end
+
+	local DungeonFinished = State.dungeonFinished
+	if DungeonFinished == nil then DungeonFinished = true end
+
+	local IsHardcore = State.isHardcore
+	if IsHardcore == nil then IsHardcore = Hardcore end
+
+	local FightingBoss = State.fightingBoss
+	if FightingBoss == nil then FightingBoss = true end
+
 	local Payload = {
 		dungeonProgress = "bossKilled",
-		dungeonStarted = State.dungeonStarted == nil and true or State.dungeonStarted,
-		dungeonFinished = State.dungeonFinished == nil and true or State.dungeonFinished,
-		hardcore = State.hardcore == true,
-		dungeonName = tostring(DungeonName),
-		isHardcore = State.isHardcore == true,
-		fightingBoss = State.fightingBoss == nil and true or State.fightingBoss
+		dungeonStarted = DungeonStarted == true,
+		dungeonFinished = DungeonFinished == true,
+		hardcore = Hardcore,
+		dungeonName = DungeonName,
+		isHardcore = IsHardcore == true,
+		fightingBoss = FightingBoss == true
 	}
+
+	print("[Replay] bossKilled detected!")
+	print("[Replay] dungeonName:", DungeonName)
+	print("[Replay] dungeonStarted:", DungeonStarted)
+	print("[Replay] dungeonFinished:", DungeonFinished)
+	print("[Replay] hardcore:", Hardcore)
+	print("[Replay] fightingBoss:", FightingBoss)
 
 	local Success, ErrorMessage = pcall(function()
 		ReplayDungeon:FireServer(Payload)
@@ -155,7 +240,7 @@ local function FireAutoReplay(State)
 
 	if Success then
 		LastAutoReplayKey = ReplayKey
-		print("[Replay] Auto Replay ->", Payload.dungeonName, Payload.dungeonProgress)
+		print("[Replay] Auto Replay FIRED ->", DungeonName)
 	else
 		warn("[Replay] Auto Replay error:", ErrorMessage)
 	end
@@ -165,7 +250,7 @@ end
 -- CONFIG
 --------------------------------------------------
 
-local VERSION = "v2.1.0"
+local VERSION = "v2.2.0"
 
 local RECORD_INTERVAL = 0.05
 
