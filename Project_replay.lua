@@ -1,9 +1,7 @@
---//========================================================
---// REPLAY SYSTEM
---// MOVEMENT + PATHFINDING + ATTACK + MULTIPLE SKILLS
---// NO TELEPORTING
---// SINGLE LOCAL SCRIPT
---//========================================================
+--==================================================
+-- REPLAY SYSTEM
+-- Movement + Pathfinding + Death Resume + Skills
+--==================================================
 
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
@@ -12,47 +10,58 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local PathfindingService = game:GetService("PathfindingService")
 
 local Player = Players.LocalPlayer
+local Remotes = ReplicatedStorage:WaitForChild("remotes")
 
---========================================================
--- SETTINGS
---========================================================
+local AbilityUsed = Remotes:WaitForChild("abilityUsed")
 
-local RECORD_INTERVAL = 0.1
 
-local WAYPOINT_DISTANCE = 3
-local PATH_POINT_DISTANCE = 3
-
-local PATH_RECALCULATE_TIME = 0.5
-local STUCK_TIME = 1.5
-
-local MAX_RESUME_DISTANCE = 150
-
---========================================================
--- REMOTES
---========================================================
-
-local Remotes =
-	ReplicatedStorage:WaitForChild("remotes")
-
-local WeaponUsed =
-	Remotes:WaitForChild("weaponUsed")
-
-local AbilityUsed =
-	Remotes:WaitForChild("abilityUsed")
-
---========================================================
+--==================================================
 -- CHARACTER
---========================================================
+--==================================================
 
 local Character
 local Humanoid
 local RootPart
 
-local DeathConnection
 
---========================================================
+local function SetupCharacter(NewCharacter)
+
+	Character = NewCharacter
+
+	Humanoid = Character:WaitForChild("Humanoid")
+	RootPart = Character:WaitForChild("HumanoidRootPart")
+
+end
+
+
+if Player.Character then
+	SetupCharacter(Player.Character)
+end
+
+
+Player.CharacterAdded:Connect(function(NewCharacter)
+	SetupCharacter(NewCharacter)
+end)
+
+
+--==================================================
+-- SETTINGS
+--==================================================
+
+local RECORD_INTERVAL = 0.1
+
+local PATH_POINT_DISTANCE = 3
+
+local PATH_RECALCULATE_TIME = 0.5
+
+local STUCK_TIME = 1.5
+
+local MAX_RESUME_DISTANCE = 150
+
+
+--==================================================
 -- STATES
---========================================================
+--==================================================
 
 local Recording = false
 local Replaying = false
@@ -68,19 +77,23 @@ local LastRecordTime = 0
 local RecordConnection = nil
 local ReplayConnection = nil
 
+local DeathConnection = nil
+
 local ResumeAfterDeath = false
 
---========================================================
+
+--==================================================
 -- REPLAY STATE
---========================================================
+--==================================================
 
 local ReplayIndex = 1
 local ReplayStartTime = 0
 local ReplayInputIndex = 1
 
---========================================================
+
+--==================================================
 -- PATHFINDING STATE
---========================================================
+--==================================================
 
 local CurrentPath = nil
 local CurrentPathIndex = 1
@@ -90,72 +103,321 @@ local LastPathCalculation = 0
 
 local LastPosition = nil
 local LastMovementCheck = 0
+
 local StuckTimer = 0
 
---========================================================
+
+--==================================================
 -- UI
---========================================================
+--==================================================
 
-local ScreenGui
-local MainFrame
-local StatusLabel
-local NameBox
-local DropdownButton
-local DropdownList
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "ReplayUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.Parent = Player:WaitForChild("PlayerGui")
 
---========================================================
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Name = "MainFrame"
+MainFrame.Size = UDim2.new(0, 300, 0, 310)
+MainFrame.Position = UDim2.new(0, 20, 0.5, -155)
+MainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+MainFrame.BorderSizePixel = 0
+MainFrame.Parent = ScreenGui
+
+
+local Corner = Instance.new("UICorner")
+Corner.CornerRadius = UDim.new(0, 8)
+Corner.Parent = MainFrame
+
+
+--==================================================
+-- HEADER
+--==================================================
+
+local Header = Instance.new("Frame")
+Header.Name = "Header"
+Header.Size = UDim2.new(1, 0, 0, 40)
+Header.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+Header.BorderSizePixel = 0
+Header.Parent = MainFrame
+
+
+local HeaderCorner = Instance.new("UICorner")
+HeaderCorner.CornerRadius = UDim.new(0, 8)
+HeaderCorner.Parent = Header
+
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, -45, 1, 0)
+Title.Position = UDim2.new(0, 12, 0, 0)
+Title.BackgroundTransparency = 1
+Title.Text = "Replay System"
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.TextSize = 18
+Title.Font = Enum.Font.GothamBold
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Parent = Header
+
+
+local MinimizeButton = Instance.new("TextButton")
+MinimizeButton.Size = UDim2.new(0, 35, 0, 30)
+MinimizeButton.Position = UDim2.new(1, -40, 0, 5)
+MinimizeButton.BackgroundTransparency = 1
+MinimizeButton.Text = "-"
+MinimizeButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+MinimizeButton.TextSize = 22
+MinimizeButton.Font = Enum.Font.GothamBold
+MinimizeButton.Parent = Header
+
+
+--==================================================
 -- STATUS
---========================================================
+--==================================================
 
-local function UpdateStatus(Text)
+local StatusLabel = Instance.new("TextLabel")
+StatusLabel.Size = UDim2.new(1, -20, 0, 25)
+StatusLabel.Position = UDim2.new(0, 10, 0, 48)
+StatusLabel.BackgroundTransparency = 1
+StatusLabel.Text = "Status: Idle"
+StatusLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+StatusLabel.TextSize = 14
+StatusLabel.Font = Enum.Font.Gotham
+StatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+StatusLabel.Parent = MainFrame
 
-	if StatusLabel then
-		StatusLabel.Text = Text
+
+--==================================================
+-- NAME BOX
+--==================================================
+
+local NameBox = Instance.new("TextBox")
+NameBox.Size = UDim2.new(1, -20, 0, 35)
+NameBox.Position = UDim2.new(0, 10, 0, 78)
+NameBox.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+NameBox.BorderSizePixel = 0
+NameBox.PlaceholderText = "Recording name..."
+NameBox.Text = ""
+NameBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+NameBox.PlaceholderColor3 = Color3.fromRGB(150, 150, 150)
+NameBox.TextSize = 14
+NameBox.Font = Enum.Font.Gotham
+NameBox.Parent = MainFrame
+
+
+local NameCorner = Instance.new("UICorner")
+NameCorner.CornerRadius = UDim.new(0, 6)
+NameCorner.Parent = NameBox
+
+
+--==================================================
+-- RECORD BUTTON
+--==================================================
+
+local RecordButton = Instance.new("TextButton")
+RecordButton.Size = UDim2.new(0.48, -5, 0, 35)
+RecordButton.Position = UDim2.new(0, 10, 0, 123)
+RecordButton.BackgroundColor3 = Color3.fromRGB(60, 120, 70)
+RecordButton.BorderSizePixel = 0
+RecordButton.Text = "Record"
+RecordButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+RecordButton.TextSize = 14
+RecordButton.Font = Enum.Font.GothamBold
+RecordButton.Parent = MainFrame
+
+
+local RecordCorner = Instance.new("UICorner")
+RecordCorner.CornerRadius = UDim.new(0, 6)
+RecordCorner.Parent = RecordButton
+
+
+--==================================================
+-- STOP BUTTON
+--==================================================
+
+local StopButton = Instance.new("TextButton")
+StopButton.Size = UDim2.new(0.48, -5, 0, 35)
+StopButton.Position = UDim2.new(0.52, 0, 0, 123)
+StopButton.BackgroundColor3 = Color3.fromRGB(130, 60, 60)
+StopButton.BorderSizePixel = 0
+StopButton.Text = "Stop"
+StopButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+StopButton.TextSize = 14
+StopButton.Font = Enum.Font.GothamBold
+StopButton.Parent = MainFrame
+
+
+local StopCorner = Instance.new("UICorner")
+StopCorner.CornerRadius = UDim.new(0, 6)
+StopCorner.Parent = StopButton
+
+
+--==================================================
+-- REPLAY BUTTON
+--==================================================
+
+local ReplayButton = Instance.new("TextButton")
+ReplayButton.Size = UDim2.new(1, -20, 0, 35)
+ReplayButton.Position = UDim2.new(0, 10, 0, 168)
+ReplayButton.BackgroundColor3 = Color3.fromRGB(65, 90, 150)
+ReplayButton.BorderSizePixel = 0
+ReplayButton.Text = "Replay Selected"
+ReplayButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+ReplayButton.TextSize = 14
+ReplayButton.Font = Enum.Font.GothamBold
+ReplayButton.Parent = MainFrame
+
+
+local ReplayCorner = Instance.new("UICorner")
+ReplayCorner.CornerRadius = UDim.new(0, 6)
+ReplayCorner.Parent = ReplayButton
+
+
+--==================================================
+-- DROPDOWN
+--==================================================
+
+local DropdownButton = Instance.new("TextButton")
+DropdownButton.Size = UDim2.new(1, -20, 0, 35)
+DropdownButton.Position = UDim2.new(0, 10, 0, 213)
+DropdownButton.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+DropdownButton.BorderSizePixel = 0
+DropdownButton.Text = "Select Recording ▼"
+DropdownButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+DropdownButton.TextSize = 14
+DropdownButton.Font = Enum.Font.Gotham
+DropdownButton.Parent = MainFrame
+
+
+local DropdownCorner = Instance.new("UICorner")
+DropdownCorner.CornerRadius = UDim.new(0, 6)
+DropdownCorner.Parent = DropdownButton
+
+
+local DropdownFrame = Instance.new("ScrollingFrame")
+DropdownFrame.Name = "Dropdown"
+DropdownFrame.Size = UDim2.new(1, -20, 0, 75)
+DropdownFrame.Position = UDim2.new(0, 10, 0, 253)
+DropdownFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+DropdownFrame.BorderSizePixel = 0
+DropdownFrame.ScrollBarThickness = 4
+DropdownFrame.Visible = false
+DropdownFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+DropdownFrame.Parent = MainFrame
+
+
+local DropdownLayout = Instance.new("UIListLayout")
+DropdownLayout.Padding = UDim.new(0, 2)
+DropdownLayout.Parent = DropdownFrame
+
+
+--==================================================
+-- MINIMIZE
+--==================================================
+
+local Minimized = false
+
+MinimizeButton.MouseButton1Click:Connect(function()
+
+	Minimized = not Minimized
+
+	if Minimized then
+
+		MainFrame.Size = UDim2.new(0, 300, 0, 40)
+
+		for _, Child in ipairs(MainFrame:GetChildren()) do
+			if Child ~= Header then
+				Child.Visible = false
+			end
+		end
+
+		MinimizeButton.Text = "+"
+
+	else
+
+		MainFrame.Size = UDim2.new(0, 300, 0, 310)
+
+		for _, Child in ipairs(MainFrame:GetChildren()) do
+			Child.Visible = true
+		end
+
+		MinimizeButton.Text = "-"
+
 	end
 
-end
+end)
 
---========================================================
--- RESET PATH
---========================================================
 
-local function ResetPath()
+--==================================================
+-- DRAGGING
+--==================================================
 
-	CurrentPath = nil
-	CurrentPathIndex = 1
+local Dragging = false
+local DragStart
+local StartPosition
 
-	LastPathTarget = nil
-	LastPathCalculation = 0
 
-	StuckTimer = 0
+Header.InputBegan:Connect(function(Input)
 
-	if RootPart then
-		LastPosition = RootPart.Position
+	if Input.UserInputType == Enum.UserInputType.MouseButton1 then
+
+		Dragging = true
+
+		DragStart = Input.Position
+		StartPosition = MainFrame.Position
+
 	end
 
-	LastMovementCheck = os.clock()
+end)
 
-end
 
---========================================================
--- FIND TOOL
---========================================================
+Header.InputEnded:Connect(function(Input)
 
-local function FindTool(ToolName)
+	if Input.UserInputType == Enum.UserInputType.MouseButton1 then
+		Dragging = false
+	end
+
+end)
+
+
+UserInputService.InputChanged:Connect(function(Input)
+
+	if not Dragging then
+		return
+	end
+
+	if Input.UserInputType ~= Enum.UserInputType.MouseMovement then
+		return
+	end
+
+	local Delta = Input.Position - DragStart
+
+	MainFrame.Position = UDim2.new(
+		StartPosition.X.Scale,
+		StartPosition.X.Offset + Delta.X,
+		StartPosition.Y.Scale,
+		StartPosition.Y.Offset + Delta.Y
+	)
+
+end)
+
+
+--==================================================
+-- FIND SKILL TOOL
+--==================================================
+
+local function FindSkillTool(ToolName)
 
 	if not ToolName then
 		return nil
 	end
 
-	local Tool
 
-	-- First check equipped tools
+	-- Check character
+
 	if Character then
 
-		Tool =
-			Character:FindFirstChild(
-				ToolName
-			)
+		local Tool = Character:FindFirstChild(ToolName)
 
 		if Tool and Tool:IsA("Tool") then
 			return Tool
@@ -163,32 +425,30 @@ local function FindTool(ToolName)
 
 	end
 
-	-- Then check Backpack
-	local Backpack =
-		Player:FindFirstChild(
-			"Backpack"
-		)
+
+	-- Check backpack
+
+	local Backpack = Player:FindFirstChild("Backpack")
 
 	if Backpack then
 
-		Tool =
-			Backpack:FindFirstChild(
-				ToolName
-			)
+		local Tool = Backpack:FindFirstChild(ToolName)
 
 		if Tool and Tool:IsA("Tool") then
 			return Tool
 		end
 
 	end
+
 
 	return nil
 
 end
 
---========================================================
--- GET CURRENT EQUIPPED TOOL
---========================================================
+
+--==================================================
+-- GET CURRENT SKILL TOOL
+--==================================================
 
 local function GetCurrentSkillTool()
 
@@ -196,218 +456,26 @@ local function GetCurrentSkillTool()
 		return nil
 	end
 
-	for _, Child in
-		ipairs(
-			Character:GetChildren()
-		)
-	do
+
+	for _, Child in ipairs(Character:GetChildren()) do
 
 		if Child:IsA("Tool") then
-
 			return Child
-
 		end
 
 	end
+
 
 	return nil
 
 end
 
---========================================================
--- CHARACTER SETUP
---========================================================
 
-local function SetupCharacter(NewCharacter)
+--==================================================
+-- RECORD SKILL
+--==================================================
 
-	Character = NewCharacter
-
-	Humanoid =
-		NewCharacter:WaitForChild(
-			"Humanoid"
-		)
-
-	RootPart =
-		NewCharacter:WaitForChild(
-			"HumanoidRootPart"
-		)
-
-	ResetPath()
-
-	if DeathConnection then
-
-		DeathConnection:Disconnect()
-		DeathConnection = nil
-
-	end
-
-	DeathConnection =
-		Humanoid.Died:Connect(
-			function()
-
-				if not Replaying then
-					return
-				end
-
-				print(
-					"[Replay] Player died."
-				)
-
-				local RecordingToResume =
-					SelectedRecording
-
-				Replaying = false
-
-				if ReplayConnection then
-
-					ReplayConnection:Disconnect()
-					ReplayConnection = nil
-
-				end
-
-				ResetPath()
-
-				UpdateStatus(
-					"Waiting for respawn..."
-				)
-
-				if not RecordingToResume then
-					return
-				end
-
-				ResumeAfterDeath = true
-
-				local NewChar =
-					Player.CharacterAdded:Wait()
-
-				Character = NewChar
-
-				Humanoid =
-					NewChar:WaitForChild(
-						"Humanoid"
-					)
-
-				RootPart =
-					NewChar:WaitForChild(
-						"HumanoidRootPart"
-					)
-
-				task.wait(0.75)
-
-				if not ResumeAfterDeath then
-					return
-				end
-
-				ResumeAfterDeath = false
-
-				--================================================
-				-- FIND CLOSEST RECORDED POINT
-				--================================================
-
-				local ClosestIndex = 1
-				local ClosestDistance = math.huge
-
-				for Index, Point in
-					ipairs(
-						RecordingToResume.Movement
-					)
-				do
-
-					local Distance =
-						(
-							RootPart.Position
-							-
-							Point.Position
-						).Magnitude
-
-					if Distance < ClosestDistance then
-
-						ClosestDistance =
-							Distance
-
-						ClosestIndex =
-							Index
-
-					end
-
-				end
-
-				print(
-					"[Replay] Closest path point:",
-					ClosestIndex
-				)
-
-				print(
-					"[Replay] Distance:",
-					math.floor(
-						ClosestDistance
-					)
-				)
-
-				--================================================
-				-- RESUME REPLAY
-				--================================================
-
-				if
-					ClosestDistance
-					<=
-					MAX_RESUME_DISTANCE
-				then
-
-					StartReplay(
-						RecordingToResume,
-						ClosestIndex
-					)
-
-				else
-
-					UpdateStatus(
-						"Respawn too far from path"
-					)
-
-				end
-
-			end
-		)
-
-end
-
---========================================================
--- INITIAL CHARACTER
---========================================================
-
-if Player.Character then
-
-	task.spawn(
-		function()
-
-			SetupCharacter(
-				Player.Character
-			)
-
-		end
-	)
-
-end
-
-Player.CharacterAdded:Connect(
-	function(NewCharacter)
-
-		SetupCharacter(
-			NewCharacter
-		)
-
-	end
-)
-
---========================================================
--- RECORD INPUT
---========================================================
-
-local function RecordInput(
-	Input,
-	State
-)
+local function RecordSkill(Key)
 
 	if not Recording then
 		return
@@ -417,478 +485,76 @@ local function RecordInput(
 		return
 	end
 
-	local IsUseful = false
 
-	--====================================================
-	-- MOUSE
-	--====================================================
+	local Tool = GetCurrentSkillTool()
 
-	if
-		Input.UserInputType
-		==
-		Enum.UserInputType.MouseButton1
-	then
-
-		IsUseful = true
-
-	elseif
-		Input.UserInputType
-		==
-		Enum.UserInputType.MouseButton2
-	then
-
-		IsUseful = true
-
-	end
-
-	--====================================================
-	-- KEYBOARD
-	--====================================================
-
-	if
-		Input.KeyCode == Enum.KeyCode.W
-		or Input.KeyCode == Enum.KeyCode.A
-		or Input.KeyCode == Enum.KeyCode.S
-		or Input.KeyCode == Enum.KeyCode.D
-		or Input.KeyCode == Enum.KeyCode.Q
-		or Input.KeyCode == Enum.KeyCode.E
-		or Input.KeyCode == Enum.KeyCode.Space
-		or Input.KeyCode == Enum.KeyCode.LeftShift
-		or Input.KeyCode == Enum.KeyCode.RightShift
-		or Input.KeyCode == Enum.KeyCode.LeftControl
-		or Input.KeyCode == Enum.KeyCode.RightControl
-	then
-
-		IsUseful = true
-
-	end
-
-	if not IsUseful then
+	if not Tool then
 		return
 	end
 
-	--====================================================
-	-- GET EQUIPPED TOOL
-	--====================================================
 
-	local ToolName = nil
+	-- Only Q/E
 
-	local Tool =
-		GetCurrentSkillTool()
-
-	if Tool then
-
-		ToolName =
-			Tool.Name
-
+	if Key ~= "q" and Key ~= "e" then
+		return
 	end
 
-	--====================================================
-	-- SAVE INPUT
-	--====================================================
 
-	table.insert(
-		CurrentRecording.Inputs,
-		{
+	table.insert(CurrentRecording.Inputs, {
 
-			Time =
-				os.clock()
-				-
-				RecordStartTime,
+		Time = os.clock() - RecordStartTime,
 
-			KeyCode =
-				Input.KeyCode,
+		ActionType = "Skill",
 
-			UserInputType =
-				Input.UserInputType,
+		Key = Key,
 
-			State =
-				State,
+		ToolName = Tool.Name
 
-			-- This is the important part.
-			-- We save which tool was equipped.
-			ToolName =
-				ToolName
-
-		}
-	)
-
-	print(
-		"[Replay Record]",
-		Input.KeyCode,
-		State,
-		"Tool:",
-		ToolName
-	)
+	})
 
 end
 
---========================================================
--- INPUT LISTENERS
---========================================================
 
-UserInputService.InputBegan:Connect(
-	function(Input)
+--==================================================
+-- REPLAY SKILL
+--==================================================
 
-		RecordInput(
-			Input,
-			"Began"
-		)
+local function ReplaySkill(Key, ToolName)
 
-	end
-)
-
-UserInputService.InputEnded:Connect(
-	function(Input)
-
-		RecordInput(
-			Input,
-			"Ended"
-		)
-
-	end
-)
-
---========================================================
--- RECORD MOVEMENT
---========================================================
-
-local function RecordSnapshot()
-
-	if not Recording then
+	if not Key then
 		return
 	end
 
-	if not CurrentRecording then
+	if not ToolName then
 		return
 	end
 
-	if not RootPart then
-		return
-	end
 
-	table.insert(
-		CurrentRecording.Movement,
-		{
+	local SkillTool = FindSkillTool(ToolName)
 
-			Time =
-				os.clock()
-				-
-				RecordStartTime,
 
-			Position =
-				RootPart.Position,
-
-			CFrame =
-				RootPart.CFrame
-
-		}
-	)
-
-end
-
---========================================================
--- START RECORDING
---========================================================
-
-local function StartRecording()
-
-	if Recording then
-		return
-	end
-
-	if Replaying then
-
-		UpdateStatus(
-			"Stop replay first"
-		)
-
-		return
-
-	end
-
-	if not RootPart then
-
-		UpdateStatus(
-			"Character not ready"
-		)
-
-		return
-
-	end
-
-	Recording = true
-
-	RecordStartTime =
-		os.clock()
-
-	LastRecordTime = 0
-
-	CurrentRecording =
-		{
-
-			Name =
-				"Recording "
-				..
-				(#Recordings + 1),
-
-			Movement = {},
-
-			Inputs = {},
-
-			Duration = 0
-
-		}
-
-	RecordSnapshot()
-
-	RecordConnection =
-		RunService.Heartbeat:Connect(
-			function()
-
-				if not Recording then
-					return
-				end
-
-				local Now =
-					os.clock()
-
-				if
-					Now
-					-
-					LastRecordTime
-					>=
-					RECORD_INTERVAL
-				then
-
-					LastRecordTime =
-						Now
-
-					RecordSnapshot()
-
-				end
-
-			end
-		)
-
-	UpdateStatus(
-		"Recording..."
-	)
-
-	print(
-		"[Replay] Recording started."
-	)
-
-end
-
---========================================================
--- STOP RECORDING
---========================================================
-
-local function StopRecording()
-
-	if not Recording then
-		return
-	end
-
-	Recording = false
-
-	if RecordConnection then
-
-		RecordConnection:Disconnect()
-		RecordConnection = nil
-
-	end
-
-	if not CurrentRecording then
-		return
-	end
-
-	if RootPart then
-
-		table.insert(
-			CurrentRecording.Movement,
-			{
-
-				Time =
-					os.clock()
-					-
-					RecordStartTime,
-
-				Position =
-					RootPart.Position,
-
-				CFrame =
-					RootPart.CFrame
-
-			}
-		)
-
-	end
-
-	CurrentRecording.Duration =
-		os.clock()
-		-
-		RecordStartTime
-
-	local Name =
-		NameBox.Text
-
-	if Name == "" then
-
-		Name =
-			"Recording "
-			..
-			(#Recordings + 1)
-
-	end
-
-	CurrentRecording.Name =
-		Name
-
-	table.insert(
-		Recordings,
-		CurrentRecording
-	)
-
-	SelectedRecording =
-		CurrentRecording
-
-	UpdateDropdown()
-
-	UpdateStatus(
-		"Saved: "
-		..
-		CurrentRecording.Name
-	)
-
-	print(
-		"[Replay] Saved:",
-		CurrentRecording.Name
-	)
-
-	print(
-		"[Replay] Movement points:",
-		#CurrentRecording.Movement
-	)
-
-	print(
-		"[Replay] Inputs:",
-		#CurrentRecording.Inputs
-	)
-
-	CurrentRecording = nil
-
-end
-
---========================================================
--- ATTACK
---========================================================
-
-local function DoAttack()
-
-	print(
-		"[Replay] ATTACK"
-	)
-
-	-- weaponUsed
-	pcall(
-		function()
-
-			WeaponUsed:FireServer()
-
-		end
-	)
-
-	--====================================================
-	-- SPIKED CLUB
-	--====================================================
-
-	local SpikedClub =
-		FindTool(
-			"Spiked Club"
-		)
-
-	if not SpikedClub then
-
-		warn(
-			"[Replay] Spiked Club not found."
-		)
-
-		return
-
-	end
-
-	local Swing =
-		SpikedClub:FindFirstChild(
-			"swing"
-		)
-
-	if Swing then
-
-		pcall(
-			function()
-
-				Swing:FireServer()
-
-			end
-		)
-
-		print(
-			"[Replay] Spiked Club swing fired."
-		)
-
-	else
-
-		warn(
-			"[Replay] Spiked Club swing RemoteEvent not found."
-		)
-
-	end
-
-end
-
---========================================================
--- USE ABILITY
---========================================================
-
-local function DoAbility(
-	Key,
-	ToolName
-)
-
-	--====================================================
-	-- FIND RECORDED TOOL
-	--====================================================
-
-	local SkillTool = nil
-
-	if ToolName then
-
-		SkillTool =
-			FindTool(
-				ToolName
-			)
-
-	end
-
-	--====================================================
-	-- FALLBACK TO CURRENT EQUIPPED TOOL
-	--====================================================
+	-- The skill might temporarily be moving
+	-- between Backpack and Character.
 
 	if not SkillTool then
 
-		SkillTool =
-			GetCurrentSkillTool()
+		local Timeout = os.clock() + 2
+
+		repeat
+
+			task.wait(0.05)
+
+			SkillTool = FindSkillTool(ToolName)
+
+		until SkillTool or os.clock() >= Timeout
 
 	end
+
 
 	if not SkillTool then
 
 		warn(
-			"[Replay] No skill tool found for:",
-			Key,
-			"Recorded tool:",
+			"[Replay] Skill not found:",
 			ToolName
 		)
 
@@ -896,166 +562,71 @@ local function DoAbility(
 
 	end
 
-	print(
-		"[Replay] Using skill:",
-		string.upper(Key),
-		"Tool:",
-		SkillTool.Name
+
+	--------------------------------------------------
+	-- GLOBAL ABILITY REMOTE
+	--------------------------------------------------
+
+	AbilityUsed:FireServer(
+		Key,
+		SkillTool
 	)
 
-	--====================================================
-	-- ABILITY USED
-	--====================================================
 
-	local AbilitySuccess =
-		pcall(
-			function()
+	--------------------------------------------------
+	-- FIND THE SKILL'S EVENT
+	--------------------------------------------------
 
-				AbilityUsed:FireServer(
-					Key,
-					SkillTool
-				)
+	local SkillEvent = nil
 
-			end
-		)
 
-	if not AbilitySuccess then
+	-- First try abilityEvent
 
-		warn(
-			"[Replay] abilityUsed failed."
-		)
+	local AbilityEvent = SkillTool:FindFirstChild("abilityEvent")
 
+	if AbilityEvent and AbilityEvent:IsA("RemoteEvent") then
+		SkillEvent = AbilityEvent
 	end
 
-	--====================================================
-	-- FIND SPELL EVENT
-	--====================================================
 
-	local SpellEvent =
-		SkillTool:FindFirstChild(
-			"spellEvent"
-		)
+	-- Then try spellEvent
 
-	if SpellEvent then
+	if not SkillEvent then
 
-		pcall(
-			function()
+		local SpellEvent = SkillTool:FindFirstChild("spellEvent")
 
-				SpellEvent:FireServer()
-
-			end
-		)
-
-		print(
-			"[Replay] Fired spellEvent for:",
-			SkillTool.Name
-		)
-
-	else
-
-		warn(
-			"[Replay] Tool does not contain spellEvent:",
-			SkillTool.Name
-		)
-
-	end
-
-end
-
---========================================================
--- EXECUTE RECORDED INPUT
---========================================================
-
-local function ExecuteRecordedInput(
-	InputData
-)
-
-	if InputData.State ~= "Began" then
-		return
-	end
-
-	--====================================================
-	-- LEFT CLICK
-	--====================================================
-
-	if
-		InputData.UserInputType
-		==
-		Enum.UserInputType.MouseButton1
-	then
-
-		DoAttack()
-
-		return
-
-	end
-
-	--====================================================
-	-- Q
-	--====================================================
-
-	if
-		InputData.KeyCode
-		==
-		Enum.KeyCode.Q
-	then
-
-		DoAbility(
-			"q",
-			InputData.ToolName
-		)
-
-		return
-
-	end
-
-	--====================================================
-	-- E
-	--====================================================
-
-	if
-		InputData.KeyCode
-		==
-		Enum.KeyCode.E
-	then
-
-		DoAbility(
-			"e",
-			InputData.ToolName
-		)
-
-		return
-
-	end
-
-	--====================================================
-	-- SPACE
-	--====================================================
-
-	if
-		InputData.KeyCode
-		==
-		Enum.KeyCode.Space
-	then
-
-		if Humanoid then
-
-			Humanoid.Jump =
-				true
-
+		if SpellEvent and SpellEvent:IsA("RemoteEvent") then
+			SkillEvent = SpellEvent
 		end
 
 	end
 
+
+	--------------------------------------------------
+	-- FIRE SKILL EVENT
+	--------------------------------------------------
+
+	if SkillEvent then
+
+		SkillEvent:FireServer()
+
+	else
+
+		warn(
+			"[Replay] No abilityEvent or spellEvent found for:",
+			ToolName
+		)
+
+	end
+
 end
 
---========================================================
--- CREATE PATH
---========================================================
 
-local function CreatePathTo(
-	TargetPosition
-)
+--==================================================
+-- CREATE PATH
+--==================================================
+
+local function CreatePathTo(TargetPosition)
 
 	if not RootPart then
 		return false
@@ -1065,178 +636,136 @@ local function CreatePathTo(
 		return false
 	end
 
-	-- Prevent excessive path calculations
-	if
-		os.clock()
-		-
-		LastPathCalculation
-		<
-		PATH_RECALCULATE_TIME
-	then
 
-		return false
+	local Path = PathfindingService:CreatePath({
 
-	end
+		AgentRadius = 2,
 
-	LastPathCalculation =
-		os.clock()
+		AgentHeight = 5,
 
-	local Path =
-		PathfindingService:CreatePath(
-			{
+		AgentCanJump = true,
 
-				AgentRadius = 2,
+		AgentCanClimb = true,
 
-				AgentHeight = 5,
+		WaypointSpacing = 3
 
-				AgentCanJump = true,
+	})
 
-				AgentCanClimb = true,
 
-				WaypointSpacing = 3
+	local Success = pcall(function()
 
-			}
+		Path:ComputeAsync(
+			RootPart.Position,
+			TargetPosition
 		)
 
-	local Success, Error =
-		pcall(
-			function()
+	end)
 
-				Path:ComputeAsync(
-					RootPart.Position,
-					TargetPosition
-				)
-
-			end
-		)
 
 	if not Success then
 
-		warn(
-			"[Replay] Path calculation error:",
-			Error
-		)
+		CurrentPath = nil
 
 		return false
 
 	end
 
-	if
-		Path.Status
-		~=
-		Enum.PathStatus.Success
-	then
 
-		warn(
-			"[Replay] No valid path found."
-		)
+	if Path.Status ~= Enum.PathStatus.Success then
+
+		CurrentPath = nil
 
 		return false
 
 	end
 
-	local Waypoints =
-		Path:GetWaypoints()
 
-	if #Waypoints < 2 then
+	CurrentPath = Path:GetWaypoints()
 
-		return false
+	CurrentPathIndex = 2
 
-	end
+	LastPathTarget = TargetPosition
 
-	CurrentPath =
-		Waypoints
-
-	CurrentPathIndex =
-		2
-
-	LastPathTarget =
-		TargetPosition
-
-	print(
-		"[Replay] Generated path with",
-		#Waypoints,
-		"waypoints."
-	)
+	LastPathCalculation = os.clock()
 
 	return true
 
 end
 
---========================================================
--- MOVE TO RECORDED POINT
---========================================================
 
-local function MoveToRecordedPoint(
-	TargetPosition
-)
+--==================================================
+-- RESET PATH
+--==================================================
 
-	if not Humanoid then
-		return false
+local function ResetPath()
+
+	CurrentPath = nil
+
+	CurrentPathIndex = 1
+
+	LastPathTarget = nil
+
+	LastPathCalculation = 0
+
+	StuckTimer = 0
+
+end
+
+
+--==================================================
+-- MOVE ALONG PATH
+--==================================================
+
+local function MoveToReplayPosition(TargetPosition)
+
+	if not Humanoid or not RootPart then
+		return
 	end
 
-	if not RootPart then
-		return false
-	end
 
-	--====================================================
-	-- DISTANCE TO TARGET
-	--====================================================
+	local Distance = (
+		RootPart.Position - TargetPosition
+	).Magnitude
 
-	local Difference =
-		TargetPosition
-		-
-		RootPart.Position
 
-	local Horizontal =
-		Vector3.new(
-			Difference.X,
-			0,
-			Difference.Z
-		)
+	-- Reached target
 
-	local Distance =
-		Horizontal.Magnitude
-
-	--====================================================
-	-- TARGET REACHED
-	--====================================================
-
-	if Distance <= WAYPOINT_DISTANCE then
+	if Distance <= PATH_POINT_DISTANCE then
 
 		ResetPath()
 
-		return true
+		ReplayIndex += 1
+
+		return
 
 	end
 
-	--====================================================
-	-- STUCK CHECK
-	--====================================================
 
-	if LastPosition then
+	--------------------------------------------------
+	-- STUCK DETECTION
+	--------------------------------------------------
 
-		local Movement =
-			(
-				RootPart.Position
-				-
-				LastPosition
+	local Now = os.clock()
+
+
+	if not LastPosition then
+
+		LastPosition = RootPart.Position
+
+		LastMovementCheck = Now
+
+	else
+
+		if Now - LastMovementCheck >= 0.25 then
+
+			local MovementDistance = (
+				RootPart.Position - LastPosition
 			).Magnitude
 
-		if
-			os.clock()
-			-
-			LastMovementCheck
-			>=
-			0.25
-		then
 
-			if Movement < 0.15 then
+			if MovementDistance < 0.25 then
 
-				StuckTimer +=
-					os.clock()
-					-
-					LastMovementCheck
+				StuckTimer += Now - LastMovementCheck
 
 			else
 
@@ -1244,248 +773,275 @@ local function MoveToRecordedPoint(
 
 			end
 
-			LastPosition =
-				RootPart.Position
 
-			LastMovementCheck =
-				os.clock()
+			LastPosition = RootPart.Position
+
+			LastMovementCheck = Now
 
 		end
 
 	end
 
-	--====================================================
-	-- PATH NEEDED?
-	--====================================================
 
-	local NeedPath = false
+	--------------------------------------------------
+	-- RECALCULATE PATH IF NEEDED
+	--------------------------------------------------
+
+	local NeedNewPath = false
+
 
 	if not CurrentPath then
 
-		NeedPath = true
+		NeedNewPath = true
 
 	elseif not LastPathTarget then
 
-		NeedPath = true
+		NeedNewPath = true
 
-	elseif
-		(
-			LastPathTarget
-			-
-			TargetPosition
-		).Magnitude
-		>
-		5
-	then
+	elseif (
+		TargetPosition - LastPathTarget
+	).Magnitude > 5 then
 
-		NeedPath = true
+		NeedNewPath = true
 
-	end
+	elseif Now - LastPathCalculation >= PATH_RECALCULATE_TIME then
 
-	if StuckTimer >= STUCK_TIME then
+		NeedNewPath = true
 
-		print(
-			"[Replay] Stuck. Recalculating path."
-		)
+	elseif StuckTimer >= STUCK_TIME then
 
-		CurrentPath = nil
-		CurrentPathIndex = 1
-
-		NeedPath = true
+		NeedNewPath = true
 
 		StuckTimer = 0
 
 	end
 
-	--====================================================
-	-- CREATE PATH
-	--====================================================
 
-	if NeedPath then
+	if NeedNewPath then
 
-		CreatePathTo(
-			TargetPosition
-		)
+		CreatePathTo(TargetPosition)
 
 	end
 
-	--====================================================
+
+	--------------------------------------------------
 	-- FOLLOW PATH
-	--====================================================
+	--------------------------------------------------
 
-	if
-		CurrentPath
-		and
-		CurrentPathIndex
-		<=
-		#CurrentPath
-	then
+	if CurrentPath then
 
-		local Waypoint =
-			CurrentPath[
-				CurrentPathIndex
-			]
+		local Waypoint = CurrentPath[CurrentPathIndex]
 
-		-- Jump if necessary
-		if
-			Waypoint.Action
-			==
-			Enum.PathWaypointAction.Jump
-		then
 
-			Humanoid.Jump =
-				true
+		if Waypoint then
 
-		end
-
-		local WaypointDifference =
-			Waypoint.Position
-			-
-			RootPart.Position
-
-		local WaypointHorizontal =
-			Vector3.new(
-				WaypointDifference.X,
-				0,
-				WaypointDifference.Z
-			)
-
-		if
-			WaypointHorizontal.Magnitude
-			<=
-			PATH_POINT_DISTANCE
-		then
-
-			CurrentPathIndex += 1
-
-		else
-
-			Humanoid:MoveTo(
+			local WaypointDistance = (
+				RootPart.Position -
 				Waypoint.Position
-			)
+			).Magnitude
+
+
+			if WaypointDistance <= 2.5 then
+
+				CurrentPathIndex += 1
+
+				Waypoint = CurrentPath[CurrentPathIndex]
+
+			end
+
+
+			if Waypoint then
+
+				if Waypoint.Action ==
+					Enum.PathWaypointAction.Jump then
+
+					Humanoid.Jump = true
+
+				end
+
+
+				Humanoid:MoveTo(
+					Waypoint.Position
+				)
+
+				return
+
+			end
 
 		end
-
-	else
-
-		--================================================
-		-- FALLBACK TO NORMAL MOVEMENT
-		--================================================
-
-		Humanoid:MoveTo(
-			Vector3.new(
-
-				TargetPosition.X,
-
-				RootPart.Position.Y,
-
-				TargetPosition.Z
-
-			)
-		)
 
 	end
 
-	return false
+
+	--------------------------------------------------
+	-- FALLBACK
+	--------------------------------------------------
+
+	Humanoid:MoveTo(TargetPosition)
 
 end
 
---========================================================
--- START REPLAY
---========================================================
 
-function StartReplay(
-	RecordingToPlay,
-	StartIndex
-)
+--==================================================
+-- FIND NEAREST MOVEMENT POINT
+--==================================================
 
-	if not RecordingToPlay then
-		return
+local function FindNearestMovementPoint(Recording)
+
+	if not Recording then
+		return nil, math.huge
 	end
 
-	if
-		#RecordingToPlay.Movement
-		<
-		2
-	then
+	if not Recording.Movement then
+		return nil, math.huge
+	end
 
-		UpdateStatus(
-			"Recording too short"
-		)
+	if not RootPart then
+		return nil, math.huge
+	end
 
-		return
+
+	local ClosestIndex = nil
+	local ClosestDistance = math.huge
+
+
+	for Index, Point in ipairs(Recording.Movement) do
+
+		if Point.Position then
+
+			local Distance = (
+				RootPart.Position -
+				Point.Position
+			).Magnitude
+
+
+			if Distance < ClosestDistance then
+
+				ClosestDistance = Distance
+
+				ClosestIndex = Index
+
+			end
+
+		end
 
 	end
 
-	if not Humanoid or not RootPart then
 
-		UpdateStatus(
-			"Character not ready"
-		)
+	return ClosestIndex, ClosestDistance
 
-		return
+end
 
-	end
+
+--==================================================
+-- STOP REPLAY
+--==================================================
+
+local function StopReplay()
+
+	Replaying = false
+
+	ResumeAfterDeath = false
+
 
 	if ReplayConnection then
 
 		ReplayConnection:Disconnect()
+
 		ReplayConnection = nil
 
 	end
 
-	Replaying = true
-
-	SelectedRecording =
-		RecordingToPlay
-
-	ReplayIndex =
-		StartIndex or 1
 
 	ResetPath()
 
-	local StartPoint =
-		RecordingToPlay.Movement[
-			ReplayIndex
-		]
 
-	if not StartPoint then
+	if Humanoid then
 
-		Replaying = false
-
-		return
+		Humanoid:Move(
+			Vector3.zero,
+			false
+		)
 
 	end
 
-	--====================================================
-	-- NO TELEPORT
-	--====================================================
 
-	ReplayStartTime =
-		os.clock()
-		-
-		StartPoint.Time
+	StatusLabel.Text = "Status: Idle"
 
-	--====================================================
-	-- FIND INPUT START
-	--====================================================
+end
+
+
+--==================================================
+-- START REPLAY
+--==================================================
+
+local function StartReplay(Recording, StartIndex)
+
+	if not Recording then
+		return
+	end
+
+	if not Recording.Movement then
+		return
+	end
+
+	if #Recording.Movement == 0 then
+		return
+	end
+
+
+	if Replaying then
+		StopReplay()
+	end
+
+
+	Replaying = true
+
+	ResumeAfterDeath = false
+
+
+	ReplayIndex = StartIndex or 1
 
 	ReplayInputIndex = 1
 
-	for Index, InputData in
-		ipairs(
-			RecordingToPlay.Inputs
-		)
-	do
+	ReplayStartTime = os.clock()
 
-		if
-			InputData.Time
-			>=
-			StartPoint.Time
-		then
 
-			ReplayInputIndex =
-				Index
+	ResetPath()
+
+
+	LastPosition = nil
+
+	LastMovementCheck = os.clock()
+
+	StuckTimer = 0
+
+
+	StatusLabel.Text =
+		"Status: Replaying " ..
+		Recording.Name
+
+
+	--------------------------------------------------
+	-- SKIP INPUTS BEFORE RESUME POINT
+	--------------------------------------------------
+
+	local StartTime = 0
+
+
+	if Recording.Movement[ReplayIndex] then
+
+		StartTime =
+			Recording.Movement[ReplayIndex].Time or 0
+
+	end
+
+
+	for Index, InputData in ipairs(Recording.Inputs) do
+
+		if InputData.Time >= StartTime then
+
+			ReplayInputIndex = Index
 
 			break
 
@@ -1493,1009 +1049,680 @@ function StartReplay(
 
 	end
 
-	--====================================================
+
+	--------------------------------------------------
 	-- REPLAY LOOP
-	--====================================================
+	--------------------------------------------------
 
-	ReplayConnection =
-		RunService.Heartbeat:Connect(
-			function()
+	ReplayConnection = RunService.Heartbeat:Connect(function()
 
-				if not Replaying then
-					return
-				end
+		if not Replaying then
+			return
+		end
 
-				if not Humanoid then
-					return
-				end
 
-				if not RootPart then
-					return
-				end
+		if not Character then
+			return
+		end
 
-				--================================================
-				-- REPLAY TIME
-				--================================================
+		if not Humanoid then
+			return
+		end
 
-				local ReplayTime =
-					os.clock()
-					-
-					ReplayStartTime
+		if not RootPart then
+			return
+		end
 
-				--================================================
-				-- REPLAY INPUTS
-				--================================================
 
-				while
-					ReplayInputIndex
-					<=
-					#RecordingToPlay.Inputs
-				do
+		--------------------------------------------------
+		-- DEAD CHECK
+		--------------------------------------------------
 
-					local InputData =
-						RecordingToPlay.Inputs[
-							ReplayInputIndex
-						]
+		if Humanoid.Health <= 0 then
 
-					if
-						InputData.Time
-						<=
-						ReplayTime
-					then
+			ResumeAfterDeath = true
 
-						ExecuteRecordedInput(
-							InputData
-						)
+			if ReplayConnection then
 
-						ReplayInputIndex += 1
+				ReplayConnection:Disconnect()
 
-					else
-
-						break
-
-					end
-
-				end
-
-				--================================================
-				-- MOVEMENT
-				--================================================
-
-				if
-					ReplayIndex
-					>
-					#RecordingToPlay.Movement
-				then
-
-					StopReplay()
-
-					return
-
-				end
-
-				local Point =
-					RecordingToPlay.Movement[
-						ReplayIndex
-					]
-
-				if not Point then
-
-					StopReplay()
-
-					return
-
-				end
-
-				local Reached =
-					MoveToRecordedPoint(
-						Point.Position
-					)
-
-				if Reached then
-
-					ReplayIndex += 1
-
-				end
+				ReplayConnection = nil
 
 			end
+
+			Replaying = false
+
+			return
+
+		end
+
+
+		--------------------------------------------------
+		-- CURRENT TIME
+		--------------------------------------------------
+
+		local ElapsedTime =
+			(
+				os.clock() -
+				ReplayStartTime
+			) + StartTime
+
+
+		--------------------------------------------------
+		-- REPLAY SKILLS
+		--------------------------------------------------
+
+		while
+			ReplayInputIndex <=
+			#Recording.Inputs
+		do
+
+			local InputData =
+				Recording.Inputs[ReplayInputIndex]
+
+
+			if InputData.Time > ElapsedTime then
+				break
+			end
+
+
+			if InputData.ActionType == "Skill" then
+
+				ReplaySkill(
+					InputData.Key,
+					InputData.ToolName
+				)
+
+			end
+
+
+			ReplayInputIndex += 1
+
+		end
+
+
+		--------------------------------------------------
+		-- FINISHED
+		--------------------------------------------------
+
+		if ReplayIndex > #Recording.Movement then
+
+			StopReplay()
+
+			return
+
+		end
+
+
+		--------------------------------------------------
+		-- CURRENT MOVEMENT POINT
+		--------------------------------------------------
+
+		local MovementData =
+			Recording.Movement[ReplayIndex]
+
+
+		if not MovementData then
+
+			StopReplay()
+
+			return
+
+		end
+
+
+		--------------------------------------------------
+		-- WAIT UNTIL TIMESTAMP
+		--------------------------------------------------
+
+		if MovementData.Time > ElapsedTime then
+			return
+		end
+
+
+		--------------------------------------------------
+		-- MOVE TO RECORDED POSITION
+		--------------------------------------------------
+
+		MoveToReplayPosition(
+			MovementData.Position
 		)
 
-	UpdateStatus(
-		"Replaying: "
-		..
-		RecordingToPlay.Name
-	)
-
-	print(
-		"[Replay] Started:"
-		,
-		RecordingToPlay.Name
-	)
+	end)
 
 end
 
---========================================================
--- STOP REPLAY
---========================================================
 
-function StopReplay()
+--==================================================
+-- RECORDING
+--==================================================
 
-	Replaying = false
-	ResumeAfterDeath = false
+local function StartRecording()
 
-	if ReplayConnection then
+	if Recording then
+		return
+	end
 
-		ReplayConnection:Disconnect()
-		ReplayConnection = nil
+
+	if Replaying then
+		StopReplay()
+	end
+
+
+	if not Character or not RootPart then
+		return
+	end
+
+
+	local RecordingName =
+		NameBox.Text
+
+
+	if RecordingName == "" then
+
+		RecordingName =
+			"Recording " ..
+			tostring(#Recordings + 1)
 
 	end
 
-	ResetPath()
 
-	if Humanoid and RootPart then
+	CurrentRecording = {
 
-		Humanoid:MoveTo(
-			RootPart.Position
-		)
+		Name = RecordingName,
 
-	end
+		Movement = {},
 
-	UpdateStatus(
-		"Replay stopped"
-	)
+		Inputs = {}
 
-	print(
-		"[Replay] Stopped."
-	)
+	}
+
+
+	Recording = true
+
+	RecordStartTime = os.clock()
+
+	LastRecordTime = 0
+
+
+	StatusLabel.Text =
+		"Status: Recording..."
+
+
+	--------------------------------------------------
+	-- RECORD MOVEMENT
+	--------------------------------------------------
+
+	RecordConnection =
+		RunService.Heartbeat:Connect(function()
+
+			if not Recording then
+				return
+			end
+
+			if not RootPart then
+				return
+			end
+
+
+			local Now = os.clock()
+
+			local Elapsed =
+				Now - RecordStartTime
+
+
+			if Elapsed - LastRecordTime <
+				RECORD_INTERVAL then
+
+				return
+
+			end
+
+
+			LastRecordTime = Elapsed
+
+
+			local Position =
+				RootPart.Position
+
+
+			table.insert(
+				CurrentRecording.Movement,
+				{
+
+					Time = Elapsed,
+
+					Position = Position,
+
+					CFrame = RootPart.CFrame
+
+				}
+			)
+
+		end)
 
 end
 
---========================================================
--- CREATE UI
---========================================================
-
-ScreenGui =
-	Instance.new("ScreenGui")
-
-ScreenGui.Name =
-	"ReplayUI"
-
-ScreenGui.ResetOnSpawn =
-	false
-
-ScreenGui.Parent =
-	Player:WaitForChild(
-		"PlayerGui"
-	)
-
---========================================================
--- MAIN FRAME
---========================================================
-
-MainFrame =
-	Instance.new("Frame")
-
-MainFrame.Size =
-	UDim2.new(
-		0,
-		300,
-		0,
-		310
-	)
-
-MainFrame.Position =
-	UDim2.new(
-		0,
-		20,
-		0.5,
-		-155
-	)
-
-MainFrame.BackgroundColor3 =
-	Color3.fromRGB(
-		25,
-		25,
-		25
-	)
-
-MainFrame.BorderSizePixel =
-	0
-
-MainFrame.Parent =
-	ScreenGui
-
-local MainCorner =
-	Instance.new("UICorner")
-
-MainCorner.CornerRadius =
-	UDim.new(
-		0,
-		8
-	)
-
-MainCorner.Parent =
-	MainFrame
-
---========================================================
--- HEADER
---========================================================
-
-local Header =
-	Instance.new("Frame")
-
-Header.Size =
-	UDim2.new(
-		1,
-		0,
-		0,
-		40
-	)
-
-Header.BackgroundColor3 =
-	Color3.fromRGB(
-		35,
-		35,
-		35
-	)
-
-Header.BorderSizePixel =
-	0
-
-Header.Parent =
-	MainFrame
-
-local Title =
-	Instance.new("TextLabel")
-
-Title.Size =
-	UDim2.new(
-		1,
-		-50,
-		1,
-		0
-	)
-
-Title.Position =
-	UDim2.new(
-		0,
-		10,
-		0,
-		0
-	)
-
-Title.BackgroundTransparency =
-	1
-
-Title.Text =
-	"Replay System"
-
-Title.TextColor3 =
-	Color3.new(
-		1,
-		1,
-		1
-	)
-
-Title.TextSize =
-	17
-
-Title.Font =
-	Enum.Font.GothamBold
-
-Title.TextXAlignment =
-	Enum.TextXAlignment.Left
-
-Title.Parent =
-	Header
-
---========================================================
--- MINIMIZE
---========================================================
-
-local Minimize =
-	Instance.new("TextButton")
-
-Minimize.Size =
-	UDim2.new(
-		0,
-		35,
-		0,
-		30
-	)
-
-Minimize.Position =
-	UDim2.new(
-		1,
-		-40,
-		0,
-		5
-	)
-
-Minimize.Text =
-	"-"
-
-Minimize.TextSize =
-	22
-
-Minimize.BackgroundTransparency =
-	1
-
-Minimize.TextColor3 =
-	Color3.new(
-		1,
-		1,
-		1
-	)
-
-Minimize.Parent =
-	Header
-
---========================================================
--- STATUS
---========================================================
-
-StatusLabel =
-	Instance.new("TextLabel")
-
-StatusLabel.Size =
-	UDim2.new(
-		1,
-		-20,
-		0,
-		30
-	)
-
-StatusLabel.Position =
-	UDim2.new(
-		0,
-		10,
-		0,
-		48
-	)
-
-StatusLabel.BackgroundTransparency =
-	1
-
-StatusLabel.Text =
-	"Ready"
-
-StatusLabel.TextColor3 =
-	Color3.fromRGB(
-		200,
-		200,
-		200
-	)
-
-StatusLabel.TextSize =
-	14
-
-StatusLabel.Font =
-	Enum.Font.Gotham
-
-StatusLabel.Parent =
-	MainFrame
-
---========================================================
--- NAME BOX
---========================================================
-
-NameBox =
-	Instance.new("TextBox")
-
-NameBox.Size =
-	UDim2.new(
-		1,
-		-20,
-		0,
-		35
-	)
-
-NameBox.Position =
-	UDim2.new(
-		0,
-		10,
-		0,
-		82
-	)
-
-NameBox.PlaceholderText =
-	"Recording name"
-
-NameBox.Text =
-	""
-
-NameBox.TextSize =
-	14
-
-NameBox.Font =
-	Enum.Font.Gotham
-
-NameBox.BackgroundColor3 =
-	Color3.fromRGB(
-		40,
-		40,
-		40
-	)
-
-NameBox.TextColor3 =
-	Color3.new(
-		1,
-		1,
-		1
-	)
-
-NameBox.Parent =
-	MainFrame
-
-local NameCorner =
-	Instance.new("UICorner")
-
-NameCorner.CornerRadius =
-	UDim.new(
-		0,
-		6
-	)
-
-NameCorner.Parent =
-	NameBox
-
---========================================================
--- BUTTON CREATOR
---========================================================
-
-local function CreateButton(
-	Text,
-	Position,
-	Size,
-	Background
+
+--==================================================
+-- STOP RECORDING
+--==================================================
+
+local function StopRecording()
+
+	if not Recording then
+		return
+	end
+
+
+	Recording = false
+
+
+	if RecordConnection then
+
+		RecordConnection:Disconnect()
+
+		RecordConnection = nil
+
+	end
+
+
+	if CurrentRecording then
+
+		table.insert(
+			Recordings,
+			CurrentRecording
+		)
+
+
+		SelectedRecording =
+			CurrentRecording
+
+	end
+
+
+	StatusLabel.Text =
+		"Status: Saved " ..
+		(CurrentRecording and CurrentRecording.Name or "")
+
+
+	CurrentRecording = nil
+
+	UpdateDropdown()
+
+end
+
+
+--==================================================
+-- RECORD Q / E INPUT
+--==================================================
+
+UserInputService.InputBegan:Connect(function(
+	Input,
+	GameProcessed
 )
 
-	local Button =
-		Instance.new("TextButton")
+	if GameProcessed then
+		return
+	end
 
-	Button.Size =
-		Size
 
-	Button.Position =
-		Position
+	--------------------------------------------------
+	-- RECORD Q
+	--------------------------------------------------
 
-	Button.Text =
-		Text
+	if Input.KeyCode == Enum.KeyCode.Q then
 
-	Button.TextSize =
-		14
+		RecordSkill("q")
 
-	Button.Font =
-		Enum.Font.GothamBold
+	end
 
-	Button.BackgroundColor3 =
-		Background
 
-	Button.TextColor3 =
-		Color3.new(
-			1,
-			1,
-			1
-		)
+	--------------------------------------------------
+	-- RECORD E
+	--------------------------------------------------
 
-	Button.Parent =
-		MainFrame
+	if Input.KeyCode == Enum.KeyCode.E then
 
-	local ButtonCorner =
-		Instance.new("UICorner")
+		RecordSkill("e")
 
-	ButtonCorner.CornerRadius =
-		UDim.new(
-			0,
-			6
-		)
+	end
 
-	ButtonCorner.Parent =
-		Button
+end)
 
-	return Button
 
-end
-
---========================================================
--- BUTTONS
---========================================================
-
-local RecordButton =
-	CreateButton(
-		"Record",
-		UDim2.new(
-			0,
-			10,
-			0,
-			125
-		),
-		UDim2.new(
-			0.31,
-			-5,
-			0,
-			38
-		),
-		Color3.fromRGB(
-			60,
-			120,
-			60
-		)
-	)
-
-local StopButton =
-	CreateButton(
-		"Stop",
-		UDim2.new(
-			0.345,
-			0,
-			0,
-			125
-		),
-		UDim2.new(
-			0.31,
-			0,
-			0,
-			38
-		),
-		Color3.fromRGB(
-			130,
-			60,
-			60
-		)
-	)
-
-local ReplayButton =
-	CreateButton(
-		"Replay",
-		UDim2.new(
-			0.69,
-			0,
-			0,
-			125
-		),
-		UDim2.new(
-			0.31,
-			0,
-			0,
-			38
-		),
-		Color3.fromRGB(
-			60,
-			90,
-			150
-		)
-	)
-
---========================================================
--- DROPDOWN
---========================================================
-
-DropdownButton =
-	Instance.new("TextButton")
-
-DropdownButton.Size =
-	UDim2.new(
-		1,
-		-20,
-		0,
-		35
-	)
-
-DropdownButton.Position =
-	UDim2.new(
-		0,
-		10,
-		0,
-		175
-	)
-
-DropdownButton.Text =
-	"No recording selected"
-
-DropdownButton.TextSize =
-	14
-
-DropdownButton.Font =
-	Enum.Font.Gotham
-
-DropdownButton.BackgroundColor3 =
-	Color3.fromRGB(
-		40,
-		40,
-		40
-	)
-
-DropdownButton.TextColor3 =
-	Color3.new(
-		1,
-		1,
-		1
-	)
-
-DropdownButton.Parent =
-	MainFrame
-
-local DropdownCorner =
-	Instance.new("UICorner")
-
-DropdownCorner.CornerRadius =
-	UDim.new(
-		0,
-		6
-	)
-
-DropdownCorner.Parent =
-	DropdownButton
-
---========================================================
--- DROPDOWN LIST
---========================================================
-
-DropdownList =
-	Instance.new("ScrollingFrame")
-
-DropdownList.Size =
-	UDim2.new(
-		1,
-		-20,
-		0,
-		85
-	)
-
-DropdownList.Position =
-	UDim2.new(
-		0,
-		10,
-		0,
-		215
-	)
-
-DropdownList.BackgroundColor3 =
-	Color3.fromRGB(
-		30,
-		30,
-		30
-	)
-
-DropdownList.BorderSizePixel =
-	0
-
-DropdownList.Visible =
-	false
-
-DropdownList.ScrollBarThickness =
-	4
-
-DropdownList.ZIndex =
-	10
-
-DropdownList.Parent =
-	MainFrame
-
---========================================================
--- UPDATE DROPDOWN
---========================================================
+--==================================================
+-- DROPDOWN UPDATE
+--==================================================
 
 function UpdateDropdown()
 
-	for _, Child in
-		ipairs(
-			DropdownList:GetChildren()
-		)
-	do
+	for _, Child in ipairs(
+		DropdownFrame:GetChildren()
+	) do
 
 		if Child:IsA("TextButton") then
-
 			Child:Destroy()
-
 		end
 
 	end
 
-	local Y = 0
 
-	for _, Recording in
-		ipairs(
-			Recordings
-		)
-	do
+	for Index, Recording in ipairs(Recordings) do
 
-		local Button =
-			Instance.new("TextButton")
+		local Button = Instance.new("TextButton")
 
 		Button.Size =
-			UDim2.new(
-				1,
-				-5,
-				0,
-				30
-			)
+			UDim2.new(1, -5, 0, 30)
 
-		Button.Position =
-			UDim2.new(
-				0,
-				0,
-				0,
-				Y
-			)
+		Button.BackgroundColor3 =
+			Color3.fromRGB(50, 50, 50)
+
+		Button.BorderSizePixel = 0
 
 		Button.Text =
 			Recording.Name
 
-		Button.TextSize =
-			13
+		Button.TextColor3 =
+			Color3.fromRGB(255, 255, 255)
+
+		Button.TextSize = 13
 
 		Button.Font =
 			Enum.Font.Gotham
 
-		Button.TextColor3 =
-			Color3.new(
-				1,
-				1,
-				1
-			)
-
-		Button.BackgroundColor3 =
-			Color3.fromRGB(
-				45,
-				45,
-				45
-			)
-
-		Button.ZIndex =
-			11
-
 		Button.Parent =
-			DropdownList
+			DropdownFrame
 
-		Button.MouseButton1Click:Connect(
-			function()
 
-				SelectedRecording =
-					Recording
+		local ButtonCorner =
+			Instance.new("UICorner")
 
-				DropdownButton.Text =
-					Recording.Name
+		ButtonCorner.CornerRadius =
+			UDim.new(0, 5)
 
-				DropdownList.Visible =
-					false
+		ButtonCorner.Parent =
+			Button
 
-				UpdateStatus(
-					"Selected: "
-					..
-					Recording.Name
-				)
 
-			end
-		)
+		Button.MouseButton1Click:Connect(function()
 
-		Y += 32
+			SelectedRecording =
+				Recording
+
+
+			DropdownButton.Text =
+				Recording.Name .. " ▼"
+
+
+			DropdownFrame.Visible =
+				false
+
+
+			StatusLabel.Text =
+				"Selected: " ..
+				Recording.Name
+
+		end)
 
 	end
 
-	DropdownList.CanvasSize =
+
+	DropdownFrame.CanvasSize =
 		UDim2.new(
 			0,
 			0,
 			0,
-			Y
+			DropdownLayout.AbsoluteContentSize.Y
 		)
 
 end
 
---========================================================
--- BUTTON EVENTS
---========================================================
 
-RecordButton.MouseButton1Click:Connect(
-	function()
+--==================================================
+-- DROPDOWN BUTTON
+--==================================================
 
-		StartRecording()
+DropdownButton.MouseButton1Click:Connect(function()
+
+	DropdownFrame.Visible =
+		not DropdownFrame.Visible
+
+end)
+
+
+--==================================================
+-- RECORD BUTTON
+--==================================================
+
+RecordButton.MouseButton1Click:Connect(function()
+
+	StartRecording()
+
+end)
+
+
+--==================================================
+-- STOP BUTTON
+--==================================================
+
+StopButton.MouseButton1Click:Connect(function()
+
+	if Recording then
+
+		StopRecording()
+
+	elseif Replaying then
+
+		StopReplay()
 
 	end
-)
 
-StopButton.MouseButton1Click:Connect(
-	function()
+end)
 
-		if Recording then
 
-			StopRecording()
+--==================================================
+-- REPLAY BUTTON
+--==================================================
 
-		elseif Replaying then
+ReplayButton.MouseButton1Click:Connect(function()
 
-			StopReplay()
+	if not SelectedRecording then
 
-		end
+		StatusLabel.Text =
+			"Status: No recording selected"
+
+		return
 
 	end
+
+
+	if #SelectedRecording.Movement == 0 then
+
+		StatusLabel.Text =
+			"Status: Recording is empty"
+
+		return
+
+	end
+
+
+	StartReplay(
+		SelectedRecording,
+		1
+	)
+
+end)
+
+
+--==================================================
+-- DEATH RESUME
+--==================================================
+
+local function SetupDeathDetection()
+
+	if DeathConnection then
+
+		DeathConnection:Disconnect()
+
+		DeathConnection = nil
+
+	end
+
+
+	if not Humanoid then
+		return
+	end
+
+
+	DeathConnection =
+		Humanoid.Died:Connect(function()
+
+			if not Replaying then
+				return
+			end
+
+
+			ResumeAfterDeath = true
+
+
+			if ReplayConnection then
+
+				ReplayConnection:Disconnect()
+
+				ReplayConnection = nil
+
+			end
+
+
+			Replaying = false
+
+
+			StatusLabel.Text =
+				"Status: Waiting for respawn..."
+
+		end)
+
+end
+
+
+--==================================================
+-- CHARACTER RESPAWN
+--==================================================
+
+Player.CharacterAdded:Connect(function(
+	NewCharacter
 )
 
-ReplayButton.MouseButton1Click:Connect(
-	function()
+	SetupCharacter(NewCharacter)
 
-		if Replaying then
+	SetupDeathDetection()
 
-			StopReplay()
 
-			return
+	if not ResumeAfterDeath then
+		return
+	end
 
-		end
 
-		if not SelectedRecording then
+	ResumeAfterDeath = false
 
-			UpdateStatus(
-				"Select a recording first"
-			)
 
-			return
+	local RecordingToResume =
+		SelectedRecording
 
-		end
 
-		DropdownList.Visible =
-			false
+	if not RecordingToResume then
 
-		StartReplay(
-			SelectedRecording,
-			1
+		StatusLabel.Text =
+			"Status: Idle"
+
+		return
+
+	end
+
+
+	--------------------------------------------------
+	-- WAIT FOR CHARACTER
+	--------------------------------------------------
+
+	task.wait(0.75)
+
+
+	if not RootPart then
+		return
+	end
+
+
+	--------------------------------------------------
+	-- FIND CLOSEST RECORDED POINT
+	--------------------------------------------------
+
+	local ClosestIndex,
+		ClosestDistance =
+		FindNearestMovementPoint(
+			RecordingToResume
 		)
 
-	end
-)
 
-DropdownButton.MouseButton1Click:Connect(
-	function()
+	if not ClosestIndex then
 
-		DropdownList.Visible =
-			not DropdownList.Visible
+		StatusLabel.Text =
+			"Status: Could not resume"
 
-	end
-)
-
---========================================================
--- MINIMIZE
---========================================================
-
-local Minimized = false
-
-Minimize.MouseButton1Click:Connect(
-	function()
-
-		Minimized =
-			not Minimized
-
-		if Minimized then
-
-			MainFrame.Size =
-				UDim2.new(
-					0,
-					300,
-					0,
-					40
-				)
-
-			Minimize.Text =
-				"+"
-
-		else
-
-			MainFrame.Size =
-				UDim2.new(
-					0,
-					300,
-					0,
-					310
-				)
-
-			Minimize.Text =
-				"-"
-
-		end
+		return
 
 	end
-)
 
---========================================================
--- DRAGGING
---========================================================
 
-local Dragging = false
-local DragStart
-local StartPosition
+	--------------------------------------------------
+	-- TOO FAR FROM RECORDED PATH
+	--------------------------------------------------
 
-Header.InputBegan:Connect(
-	function(Input)
+	if ClosestDistance >
+		MAX_RESUME_DISTANCE then
 
-		if
-			Input.UserInputType
-			==
-			Enum.UserInputType.MouseButton1
-		then
+		StatusLabel.Text =
+			"Status: Respawn too far from path"
 
-			Dragging = true
-
-			DragStart =
-				Input.Position
-
-			StartPosition =
-				MainFrame.Position
-
-		end
+		return
 
 	end
-)
 
-Header.InputEnded:Connect(
-	function(Input)
 
-		if
-			Input.UserInputType
-			==
-			Enum.UserInputType.MouseButton1
-		then
+	--------------------------------------------------
+	-- RESUME WITHOUT TELEPORTING
+	--------------------------------------------------
 
-			Dragging = false
+	StatusLabel.Text =
+		"Status: Resuming replay..."
 
-		end
 
-	end
-)
+	task.wait(0.25)
 
-UserInputService.InputChanged:Connect(
-	function(Input)
 
-		if not Dragging then
-			return
-		end
+	StartReplay(
+		RecordingToResume,
+		ClosestIndex
+	)
 
-		if
-			Input.UserInputType
-			~=
-			Enum.UserInputType.MouseMovement
-		then
+end)
 
-			return
 
-		end
+--==================================================
+-- INITIAL DEATH DETECTION
+--==================================================
 
-		local Delta =
-			Input.Position
-			-
-			DragStart
+if Humanoid then
+	SetupDeathDetection()
+end
 
-		MainFrame.Position =
-			UDim2.new(
 
-				StartPosition.X.Scale,
+--==================================================
+-- INITIAL UI
+--==================================================
 
-				StartPosition.X.Offset
-					+
-					Delta.X,
+UpdateDropdown()
 
-				StartPosition.Y.Scale,
 
-				StartPosition.Y.Offset
-					+
-					Delta.Y
-
-			)
-
-	end
-)
-
---========================================================
--- LOADED
---========================================================
-
-print("==========================================")
-print("         REPLAY SYSTEM LOADED")
-print("==========================================")
-print("Movement       : Humanoid:MoveTo")
-print("Pathfinding    : ENABLED")
-print("Teleporting    : NONE")
-print("Attack         : weaponUsed + Spiked Club")
-print("Q/E            : Dynamic equipped skill")
-print("Skill Tool     : Recorded")
-print("Death Resume   : ENABLED")
-print("==========================================")
+StatusLabel.Text =
+	"Status: Idle"
