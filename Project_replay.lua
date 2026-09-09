@@ -1,6 +1,6 @@
 --//========================================================
 --// REPLAY SYSTEM
---// NORMAL WALKING + ATTACK + Q/E
+--// NORMAL WALKING + PATHFINDING + ATTACK + Q/E
 --// NO TELEPORTING
 --// SINGLE LOCAL SCRIPT
 --//========================================================
@@ -9,6 +9,7 @@ local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local PathfindingService = game:GetService("PathfindingService")
 
 local Player = Players.LocalPlayer
 
@@ -18,17 +19,28 @@ local Player = Players.LocalPlayer
 
 local RECORD_INTERVAL = 0.1
 
--- Distance before the replay considers a waypoint reached
+-- How close we need to get to a recorded point
 local WAYPOINT_DISTANCE = 3
 
--- Maximum distance from recorded path after death
+-- How close we need to get to a generated path point
+local PATH_POINT_DISTANCE = 3
+
+-- How often we check if a new path is needed
+local PATH_RECALCULATE_TIME = 0.5
+
+-- If the character hasn't moved this much for this long,
+-- assume it is stuck.
+local STUCK_TIME = 1.5
+
+-- Maximum distance allowed when finding the path after death
 local MAX_RESUME_DISTANCE = 150
 
 --========================================================
 -- REMOTES
 --========================================================
 
-local Remotes = ReplicatedStorage:WaitForChild("remotes")
+local Remotes =
+	ReplicatedStorage:WaitForChild("remotes")
 
 local WeaponUsed =
 	Remotes:WaitForChild("weaponUsed")
@@ -43,6 +55,8 @@ local AbilityUsed =
 local Character
 local Humanoid
 local RootPart
+
+local DeathConnection
 
 --========================================================
 -- STATES
@@ -61,17 +75,30 @@ local LastRecordTime = 0
 
 local RecordConnection = nil
 local ReplayConnection = nil
-local DeathConnection = nil
 
 local ResumeAfterDeath = false
 
 --========================================================
--- REPLAY VARIABLES
+-- REPLAY
 --========================================================
 
 local ReplayIndex = 1
 local ReplayStartTime = 0
 local ReplayInputIndex = 1
+
+--========================================================
+-- PATHFINDING
+--========================================================
+
+local CurrentPath = nil
+local CurrentPathIndex = 1
+
+local LastPathTarget = nil
+local LastPathCalculation = 0
+
+local LastPosition = nil
+local LastMovementCheck = 0
+local StuckTimer = 0
 
 --========================================================
 -- UI
@@ -97,6 +124,28 @@ local function UpdateStatus(Text)
 end
 
 --========================================================
+-- RESET PATH
+--========================================================
+
+local function ResetPath()
+
+	CurrentPath = nil
+	CurrentPathIndex = 1
+
+	LastPathTarget = nil
+	LastPathCalculation = 0
+
+	StuckTimer = 0
+
+	if RootPart then
+		LastPosition = RootPart.Position
+	end
+
+	LastMovementCheck = os.clock()
+
+end
+
+--========================================================
 -- CHARACTER SETUP
 --========================================================
 
@@ -110,9 +159,13 @@ local function SetupCharacter(NewCharacter)
 	RootPart =
 		NewCharacter:WaitForChild("HumanoidRootPart")
 
+	ResetPath()
+
 	if DeathConnection then
+
 		DeathConnection:Disconnect()
 		DeathConnection = nil
+
 	end
 
 	DeathConnection =
@@ -136,7 +189,11 @@ local function SetupCharacter(NewCharacter)
 
 			end
 
-			UpdateStatus("Waiting for respawn...")
+			ResetPath()
+
+			UpdateStatus(
+				"Waiting for respawn..."
+			)
 
 			if not RecordingToResume then
 				return
@@ -166,7 +223,7 @@ local function SetupCharacter(NewCharacter)
 			ResumeAfterDeath = false
 
 			--================================================
-			-- FIND CLOSEST RECORDED POSITION
+			-- FIND CLOSEST RECORDED POINT
 			--================================================
 
 			local ClosestIndex = 1
@@ -208,10 +265,14 @@ local function SetupCharacter(NewCharacter)
 			)
 
 			--================================================
-			-- RESUME WITHOUT TELEPORTING
+			-- RESUME
 			--================================================
 
-			if ClosestDistance <= MAX_RESUME_DISTANCE then
+			if
+				ClosestDistance
+				<=
+				MAX_RESUME_DISTANCE
+			then
 
 				StartReplay(
 					RecordingToResume,
@@ -334,7 +395,7 @@ local function RecordInput(Input, State)
 end
 
 --========================================================
--- INPUT BEGAN
+-- INPUT
 --========================================================
 
 UserInputService.InputBegan:Connect(
@@ -347,10 +408,6 @@ UserInputService.InputBegan:Connect(
 
 	end
 )
-
---========================================================
--- INPUT ENDED
---========================================================
 
 UserInputService.InputEnded:Connect(
 	function(Input)
@@ -487,7 +544,9 @@ local function StartRecording()
 		"Recording..."
 	)
 
-	print("[Replay] Recording started.")
+	print(
+		"[Replay] Recording started."
+	)
 
 end
 
@@ -597,7 +656,7 @@ end
 
 local function FindTool(ToolName)
 
-	local Tool = nil
+	local Tool
 
 	if Character then
 
@@ -636,21 +695,22 @@ end
 
 local function DoAttack()
 
-	print("[Replay] ATTACK")
+	print(
+		"[Replay] ATTACK"
+	)
 
-	-- First remote
+	-- weaponUsed
 	pcall(function()
 
 		WeaponUsed:FireServer()
 
 	end)
 
-	--====================================================
-	-- SPIKED CLUB SWING
-	--====================================================
-
+	-- Spiked Club swing
 	local SpikedClub =
-		FindTool("Spiked Club")
+		FindTool(
+			"Spiked Club"
+		)
 
 	if SpikedClub then
 
@@ -686,13 +746,15 @@ local function DoAttack()
 end
 
 --========================================================
--- Q / E
+-- ABILITY
 --========================================================
 
 local function DoAbility(Key)
 
 	local Whirlwind =
-		FindTool("Whirlwind")
+		FindTool(
+			"Whirlwind"
+		)
 
 	if not Whirlwind then
 
@@ -741,10 +803,7 @@ local function ExecuteRecordedInput(InputData)
 		return
 	end
 
-	--====================================================
-	-- ATTACK
-	--====================================================
-
+	-- LEFT CLICK
 	if
 		InputData.UserInputType ==
 		Enum.UserInputType.MouseButton1
@@ -755,10 +814,7 @@ local function ExecuteRecordedInput(InputData)
 		return
 	end
 
-	--====================================================
 	-- Q
-	--====================================================
-
 	if
 		InputData.KeyCode ==
 		Enum.KeyCode.Q
@@ -769,10 +825,7 @@ local function ExecuteRecordedInput(InputData)
 		return
 	end
 
-	--====================================================
 	-- E
-	--====================================================
-
 	if
 		InputData.KeyCode ==
 		Enum.KeyCode.E
@@ -783,10 +836,7 @@ local function ExecuteRecordedInput(InputData)
 		return
 	end
 
-	--====================================================
-	-- SPACE / JUMP
-	--====================================================
-
+	-- SPACE
 	if
 		InputData.KeyCode ==
 		Enum.KeyCode.Space
@@ -803,7 +853,102 @@ local function ExecuteRecordedInput(InputData)
 end
 
 --========================================================
--- MOVE TO RECORDED POINT
+-- CREATE PATH
+--========================================================
+
+local function CreatePathTo(TargetPosition)
+
+	if not RootPart then
+		return false
+	end
+
+	if not Humanoid then
+		return false
+	end
+
+	local Path =
+		PathfindingService:CreatePath({
+
+			AgentRadius = 2,
+
+			AgentHeight = 5,
+
+			AgentCanJump = true,
+
+			AgentCanClimb = true,
+
+			WaypointSpacing = 3
+
+		})
+
+	local Success, Error =
+		pcall(function()
+
+			Path:ComputeAsync(
+				RootPart.Position,
+				TargetPosition
+			)
+
+		end)
+
+	if not Success then
+
+		warn(
+			"[Replay] Path calculation error:",
+			Error
+		)
+
+		return false
+
+	end
+
+	if
+		Path.Status
+		~=
+		Enum.PathStatus.Success
+	then
+
+		warn(
+			"[Replay] Could not find path."
+		)
+
+		return false
+
+	end
+
+	local Waypoints =
+		Path:GetWaypoints()
+
+	if #Waypoints < 2 then
+
+		return false
+
+	end
+
+	CurrentPath =
+		Waypoints
+
+	CurrentPathIndex =
+		2
+
+	LastPathTarget =
+		TargetPosition
+
+	LastPathCalculation =
+		os.clock()
+
+	print(
+		"[Replay] Path generated:",
+		#Waypoints,
+		"points"
+	)
+
+	return true
+
+end
+
+--========================================================
+-- MOVE USING PATHFINDING
 --========================================================
 
 local function MoveToRecordedPoint(TargetPosition)
@@ -816,56 +961,228 @@ local function MoveToRecordedPoint(TargetPosition)
 		return false
 	end
 
-	local CurrentPosition =
+	--====================================================
+	-- DIRECT DISTANCE
+	--====================================================
+
+	local Difference =
+		TargetPosition
+		-
 		RootPart.Position
 
-	-- Only use horizontal distance
-	local Difference =
+	local Horizontal =
 		Vector3.new(
-
-			TargetPosition.X
-			-
-			CurrentPosition.X,
-
+			Difference.X,
 			0,
-
-			TargetPosition.Z
-			-
-			CurrentPosition.Z
-
+			Difference.Z
 		)
 
 	local Distance =
-		Difference.Magnitude
+		Horizontal.Magnitude
 
 	--====================================================
-	-- REACHED
+	-- TARGET REACHED
 	--====================================================
 
 	if Distance <= WAYPOINT_DISTANCE then
+
+		ResetPath()
 
 		return true
 
 	end
 
 	--====================================================
-	-- NORMAL HUMANOID MOVEMENT
+	-- CHECK IF WE NEED A NEW PATH
 	--====================================================
 
-	-- THIS DOES NOT TELEPORT.
-	-- Humanoid physically walks toward the position.
+	local NeedNewPath = false
 
-	Humanoid:MoveTo(
-		Vector3.new(
+	if not CurrentPath then
 
-			TargetPosition.X,
+		NeedNewPath = true
 
-			CurrentPosition.Y,
+	elseif not LastPathTarget then
 
-			TargetPosition.Z
+		NeedNewPath = true
 
+	elseif
+		(
+			LastPathTarget
+			-
+			TargetPosition
+		).Magnitude
+		>
+		5
+	then
+
+		NeedNewPath = true
+
+	elseif
+		os.clock()
+		-
+		LastPathCalculation
+		>
+		PATH_RECALCULATE_TIME
+	then
+
+		NeedNewPath = true
+
+	end
+
+	--====================================================
+	-- STUCK DETECTION
+	--====================================================
+
+	if LastPosition then
+
+		local Movement =
+			(
+				RootPart.Position
+				-
+				LastPosition
+			).Magnitude
+
+		if
+			os.clock()
+			-
+			LastMovementCheck
+			>=
+			0.25
+		then
+
+			if Movement < 0.15 then
+
+				StuckTimer +=
+					os.clock()
+					-
+					LastMovementCheck
+
+			else
+
+				StuckTimer = 0
+
+			end
+
+			LastPosition =
+				RootPart.Position
+
+			LastMovementCheck =
+				os.clock()
+
+		end
+
+	end
+
+	if StuckTimer >= STUCK_TIME then
+
+		print(
+			"[Replay] Character stuck - recalculating path."
 		)
-	)
+
+		NeedNewPath = true
+
+		StuckTimer = 0
+
+	end
+
+	--====================================================
+	-- GENERATE PATH
+	--====================================================
+
+	if NeedNewPath then
+
+		CreatePathTo(
+			TargetPosition
+		)
+
+	end
+
+	--====================================================
+	-- USE GENERATED PATH
+	--====================================================
+
+	if
+		CurrentPath
+		and
+		CurrentPathIndex
+		<=
+		#CurrentPath
+	then
+
+		local PathWaypoint =
+			CurrentPath[
+				CurrentPathIndex
+			]
+
+		-- Jump when path requires it
+		if
+			PathWaypoint.Action
+			==
+			Enum.PathWaypointAction.Jump
+		then
+
+			Humanoid.Jump = true
+
+		end
+
+		local PathPosition =
+			PathWaypoint.Position
+
+		local PathDifference =
+			PathPosition
+			-
+			RootPart.Position
+
+		local PathHorizontal =
+			Vector3.new(
+				PathDifference.X,
+				0,
+				PathDifference.Z
+			)
+
+		if
+			PathHorizontal.Magnitude
+			<=
+			PATH_POINT_DISTANCE
+		then
+
+			CurrentPathIndex += 1
+
+		else
+
+			--================================================
+			-- ACTUAL PHYSICAL MOVEMENT
+			--================================================
+
+			Humanoid:MoveTo(
+				PathPosition
+			)
+
+		end
+
+	else
+
+		--====================================================
+		-- FALLBACK
+		--====================================================
+
+		-- If Pathfinding can't find anything,
+		-- still attempt normal walking.
+
+		Humanoid:MoveTo(
+			Vector3.new(
+
+				TargetPosition.X,
+
+				RootPart.Position.Y,
+
+				TargetPosition.Z
+
+			)
+		)
+
+	end
 
 	return false
 
@@ -906,7 +1223,6 @@ function StartReplay(
 		return
 	end
 
-	-- Stop existing replay
 	if ReplayConnection then
 
 		ReplayConnection:Disconnect()
@@ -922,6 +1238,8 @@ function StartReplay(
 	ReplayIndex =
 		StartIndex or 1
 
+	ResetPath()
+
 	local StartPoint =
 		RecordingToPlay.Movement[
 			ReplayIndex
@@ -935,8 +1253,6 @@ function StartReplay(
 	end
 
 	--====================================================
-	-- IMPORTANT:
-	-- NO CFRAME
 	-- NO TELEPORT
 	--====================================================
 
@@ -946,7 +1262,7 @@ function StartReplay(
 	StartPoint.Time
 
 	--====================================================
-	-- FIND INPUT INDEX
+	-- INPUT INDEX
 	--====================================================
 
 	ReplayInputIndex = 1
@@ -993,7 +1309,7 @@ function StartReplay(
 				end
 
 				--================================================
-				-- REPLAY TIME
+				-- TIME
 				--================================================
 
 				local ReplayTime =
@@ -1037,7 +1353,7 @@ function StartReplay(
 				end
 
 				--================================================
-				-- FINISHED MOVEMENT
+				-- MOVEMENT
 				--================================================
 
 				if
@@ -1052,10 +1368,6 @@ function StartReplay(
 
 				end
 
-				--================================================
-				-- CURRENT WAYPOINT
-				--================================================
-
 				local Point =
 					RecordingToPlay.Movement[
 						ReplayIndex
@@ -1064,6 +1376,7 @@ function StartReplay(
 				if not Point then
 
 					StopReplay()
+
 					return
 
 				end
@@ -1089,7 +1402,7 @@ function StartReplay(
 	)
 
 	print(
-		"[Replay] Started normal walking."
+		"[Replay] Started with pathfinding."
 	)
 
 end
@@ -1101,7 +1414,6 @@ end
 function StopReplay()
 
 	Replaying = false
-
 	ResumeAfterDeath = false
 
 	if ReplayConnection then
@@ -1111,7 +1423,9 @@ function StopReplay()
 
 	end
 
-	if Humanoid then
+	ResetPath()
+
+	if Humanoid and RootPart then
 
 		Humanoid:MoveTo(
 			RootPart.Position
@@ -1355,7 +1669,7 @@ StatusLabel.Parent =
 	MainFrame
 
 --========================================================
--- NAME
+-- NAME BOX
 --========================================================
 
 NameBox =
@@ -1963,10 +2277,11 @@ UserInputService.InputChanged:Connect(
 print("==========================================")
 print("       REPLAY SYSTEM LOADED")
 print("==========================================")
-print("Movement : Humanoid:MoveTo")
-print("Teleport : NONE")
-print("Attack   : weaponUsed + Spiked Club swing")
-print("Q        : abilityUsed + spellEvent")
-print("E        : abilityUsed + spellEvent")
-print("Death    : Resume from nearest path")
+print("Movement       : Humanoid:MoveTo")
+print("Pathfinding    : ENABLED")
+print("Teleporting    : NONE")
+print("Attack         : weaponUsed + Spiked Club swing")
+print("Q              : abilityUsed + spellEvent")
+print("E              : abilityUsed + spellEvent")
+print("Death Resume   : ENABLED")
 print("==========================================")
