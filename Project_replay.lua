@@ -59,6 +59,25 @@ local AUTO_START_COOLDOWN = 3
 local AUTO_REPLAY_RECORDING_DELAY = 6
 local DUNGEON_SCAN_INTERVAL = 0.35
 
+local HIGH_PING_THRESHOLD = 0.30
+local NORMAL_PING_THRESHOLD = 0.18
+
+local function GetCurrentPing()
+	local Success, Ping = pcall(function()
+		return Player:GetNetworkPing()
+	end)
+
+	if Success and type(Ping) == "number" then
+		return Ping
+	end
+
+	return 0
+end
+
+local function IsPingHigh()
+	return GetCurrentPing() >= HIGH_PING_THRESHOLD
+end
+
 local DungeonState = {
 	dungeonStarted = nil,
 	dungeonProgress = nil,
@@ -1604,6 +1623,13 @@ end
 -- REPLAY MOVEMENT
 --------------------------------------------------
 
+local function WaitForNormalPing()
+	while IsReplaying and IsPingHigh() do
+		task.wait(0.1)
+	end
+	return IsReplaying
+end
+
 local function ReplayMovement(
 	Recording
 )
@@ -1660,6 +1686,22 @@ local function ReplayMovement(
 		os.clock()
 
 	while IsReplaying do
+
+		-- High ping can make server movement/ability replication arrive late.
+		-- Freeze the replay clock while latency is high so recorded actions are
+		-- not consumed early. The replay resumes when ping returns to normal.
+		if IsPingHigh() then
+			local PingWaitStart = os.clock()
+			print(string.format("[Replay] High ping (%.0f ms) - pausing replay", GetCurrentPing() * 1000))
+			while IsReplaying and GetCurrentPing() >= NORMAL_PING_THRESHOLD do
+				task.wait(0.1)
+			end
+			if not IsReplaying then
+				break
+			end
+			RealStart += os.clock() - PingWaitStart
+			print(string.format("[Replay] Ping normal (%.0f ms) - resuming replay", GetCurrentPing() * 1000))
+		end
 
 		if not Character
 			or not Character.Parent
@@ -4924,11 +4966,11 @@ task.spawn(function()
 			AutoStartPending = false
 		end
 
-		if AutoStart and State.dungeonStarted ~= true and not AutoStartPending then
+		if AutoStart and State.dungeonStarted ~= true and not AutoStartPending and not IsPingHigh() then
 			FireAutoStart()
 		end
 
-		if AutoReplay then
+		if AutoReplay and not IsPingHigh() then
 			FireAutoReplay(State)
 		end
 
@@ -4936,7 +4978,7 @@ task.spawn(function()
 		-- after Auto Start. This never calls replayDungeon.
 		if AutoReplayRecording and AutoReplayRecordingAt then
 			local Now = os.clock()
-			if Now >= AutoReplayRecordingAt then
+			if Now >= AutoReplayRecordingAt and not IsPingHigh() then
 				if IsReplaying then
 					-- Something is already replaying, so don't start a second replay.
 					AutoReplayRecordingAt = nil
