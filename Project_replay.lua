@@ -840,8 +840,12 @@ local LastRecordTime = 0
 -- Respawn/replay synchronization
 local ReplayRespawnPending = false
 local ReplayRespawnIndex = nil
-local ReplayRespawnTime = nil
-local ActiveReplayRecording = nil
+-- Combined into a single table (instead of two separate top-level locals)
+-- to stay under Luau's 200 local-register limit for the main chunk.
+local ReplayState = {
+	RespawnTime = nil,
+	ActiveRecording = nil,
+}
 local RecordingRespawnPending = false
 
 local SkillActionIndex = 1
@@ -1746,7 +1750,7 @@ local function ReplayActionsBetween(
 					-- Remember the exact recorded death time. After the new
 					-- character spawns, replay resumes AFTER this action instead
 					-- of finding a nearby point that could be before the death.
-					ReplayRespawnTime = Action.Time or 0
+					ReplayState.RespawnTime = Action.Time or 0
 
 					pcall(function()
 						Humanoid.Health = 0
@@ -1876,9 +1880,9 @@ local function ReplayMovement(
 		if ReplayRespawnPending then
 			local ResumeIndex = ReplayRespawnIndex
 
-			if not ResumeIndex and ReplayRespawnTime then
+			if not ResumeIndex and ReplayState.RespawnTime then
 				for MovementIndex, Point in ipairs(Movement) do
-					if (Point.Time or 0) >= ReplayRespawnTime then
+					if (Point.Time or 0) >= ReplayState.RespawnTime then
 						ResumeIndex = MovementIndex
 						break
 					end
@@ -1919,7 +1923,7 @@ local function ReplayMovement(
 
 			ReplayRespawnPending = false
 			ReplayRespawnIndex = nil
-			ReplayRespawnTime = nil
+			ReplayState.RespawnTime = nil
 
 			print("[Replay] Respawned. Resuming from point:", ResumeIndex)
 		end
@@ -2050,10 +2054,10 @@ local function ReplayMovement(
 	IsReplaying =
 		false
 
-	ActiveReplayRecording = nil
+	ReplayState.ActiveRecording = nil
 	ReplayRespawnPending = false
 	ReplayRespawnIndex = nil
-	ReplayRespawnTime = nil
+	ReplayState.RespawnTime = nil
 
 	ClearPath()
 
@@ -2202,10 +2206,10 @@ local function StartReplay(RecordingOverride)
 	ReplayMovementIndex =
 		1
 
-	ActiveReplayRecording = RecordingToPlay
+	ReplayState.ActiveRecording = RecordingToPlay
 	ReplayRespawnPending = false
 	ReplayRespawnIndex = nil
-	ReplayRespawnTime = nil
+	ReplayState.RespawnTime = nil
 
 	ReplayStartPositioning = true
 
@@ -2242,10 +2246,10 @@ local function StopReplay()
 	IsReplaying =
 		false
 
-	ActiveReplayRecording = nil
+	ReplayState.ActiveRecording = nil
 	ReplayRespawnPending = false
 	ReplayRespawnIndex = nil
-	ReplayRespawnTime = nil
+	ReplayState.RespawnTime = nil
 
 	ClearPath()
 
@@ -2283,7 +2287,7 @@ Player.CharacterAdded:Connect(
 			return
 		end
 
-		local ReplayRecording = ActiveReplayRecording
+		local ReplayRecording = ReplayState.ActiveRecording
 		if not ReplayRecording then
 			return
 		end
@@ -2297,9 +2301,9 @@ Player.CharacterAdded:Connect(
 
 		local ResumeIndex = nil
 
-		if ReplayRespawnTime then
+		if ReplayState.RespawnTime then
 			for MovementIndex, Point in ipairs(ReplayRecording.Movement or {}) do
-				if (Point.Time or 0) >= ReplayRespawnTime then
+				if (Point.Time or 0) >= ReplayState.RespawnTime then
 					ResumeIndex = MovementIndex
 					break
 				end
@@ -2347,19 +2351,24 @@ ScreenGui.DisplayOrder = 999
 ScreenGui.ZIndexBehavior =
 	Enum.ZIndexBehavior.Sibling
 
-local PlayerGui = Player:WaitForChild("PlayerGui")
+-- Scoped in a do...end block so PlayerGui/ExistingGui free their registers
+-- immediately instead of staying live for the rest of the script (the UI
+-- section below already uses close to Luau's 200 local-register limit).
+do
+	local PlayerGui = Player:WaitForChild("PlayerGui")
 
--- Prevent duplicate copies of the UI from stacking when the script is
--- re-executed without restarting the character.
-for _, ExistingGui in ipairs(PlayerGui:GetChildren()) do
-	if ExistingGui ~= ScreenGui
-		and ExistingGui:IsA("ScreenGui")
-		and ExistingGui.Name == "ReplaySystemUI" then
-		ExistingGui:Destroy()
+	-- Prevent duplicate copies of the UI from stacking when the script is
+	-- re-executed without restarting the character.
+	for _, ExistingGui in ipairs(PlayerGui:GetChildren()) do
+		if ExistingGui ~= ScreenGui
+			and ExistingGui:IsA("ScreenGui")
+			and ExistingGui.Name == "ReplaySystemUI" then
+			ExistingGui:Destroy()
+		end
 	end
-end
 
-ScreenGui.Parent = PlayerGui
+	ScreenGui.Parent = PlayerGui
+end
 
 --------------------------------------------------
 -- COLORS
