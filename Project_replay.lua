@@ -1,4 +1,4 @@
---// Replay System v3.6.5
+--// Replay System v3.6.5 fixed 1
 --// Cloudflare D1 recording sync integration
 --// Compact Mobile UI
 --// Multiple Recordings + Mouse/Touch Dragging
@@ -1900,6 +1900,16 @@ local function ReplayMovement(
 		if ReplayRespawnPending then
 			local ResumeIndex = ReplayRespawnIndex
 
+			-- The actual moment of death/respawn -- NOT the coarser resume
+			-- movement point below -- is the correct cutoff for deciding
+			-- which actions still need to be replayed. Movement points are
+			-- only sampled periodically, so the nearest one at/after death
+			-- can land noticeably later than the death itself. Any skill
+			-- the original player cast in that gap (e.g. right after
+			-- respawning, before the next movement sample) has a Time
+			-- earlier than the movement point but is still owed a replay.
+			local ActionResetAnchorTime = ReplayState.RespawnTime
+
 			if not ResumeIndex and ReplayState.RespawnTime then
 				for MovementIndex, Point in ipairs(Movement) do
 					if (Point.Time or 0) >= ReplayState.RespawnTime then
@@ -1938,8 +1948,12 @@ local function ReplayMovement(
 			LastStuckPosition = RootPart.Position
 			StuckStartTime = os.clock()
 
+			-- Fall back to StartTime only if we never had a precise death
+			-- time to begin with (e.g. FindNearestMovementIndex was used).
+			ActionResetAnchorTime = ActionResetAnchorTime or StartTime
+
 			for _, Action in ipairs(Recording.Actions or {}) do
-				Action._Replayed = (Action.Time or 0) < StartTime
+				Action._Replayed = (Action.Time or 0) < ActionResetAnchorTime
 			end
 
 			ReplayRespawnPending = false
