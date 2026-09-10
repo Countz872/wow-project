@@ -1,29 +1,23 @@
---// Replay System v3.6.5 afk fixed
+--// Replay System v3.6.5
 --// Cloudflare D1 recording sync integration
 --// Compact Mobile UI
 --// Multiple Recordings + Mouse/Touch Dragging
---// Movement + Pathfinding + Skill Replay
+--// Movement + Skill Replay (no pathfinding)
 
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local PathfindingService = game:GetService("PathfindingService")
 
 --==================================================
 -- DIRECT CLOUDFLARE CONFIG
 --==================================================
--- This version talks to Cloudflare directly from the LocalScript.
--- This is convenient for testing, but the API key is visible to the client.
--- For a public game, use a server-side proxy instead.
 local CLOUDFLARE_WORKER_URL = "https://project-replay.meijio12115.workers.dev"
 local CLOUDFLARE_API_KEY = "ProjectReplay_2026_x8Kp92LmQ7vT4z"
 local CLOUDFLARE_SAVE_PATH = "/api/replay/save"
 local CLOUDFLARE_LOAD_PATH = "/api/replay/load"
 
--- Normalize the Worker URL so a trailing slash never creates //api/... URLs.
 CLOUDFLARE_WORKER_URL = CLOUDFLARE_WORKER_URL:gsub("/+$", "")
-
 
 local Player = Players.LocalPlayer
 local Backpack = nil
@@ -40,7 +34,6 @@ local AbilityUsed = Remotes and Remotes:FindFirstChild("abilityUsed") or nil
 local ChangeStartValue = Remotes and Remotes:FindFirstChild("changeStartValue") or nil
 local ReplayDungeon = Remotes and Remotes:FindFirstChild("replayDungeon") or nil
 
--- Do not block UI creation if a remote is temporarily unavailable.
 task.spawn(function()
 	while not Remotes do
 		Remotes = ReplicatedStorage:FindFirstChild("remotes")
@@ -80,8 +73,7 @@ local AUTO_REPLAY_RECORDING_DELAY = 6
 local DUNGEON_SCAN_INTERVAL = 0.35
 
 -- Emergency requeue threshold: only a full second of latency triggers the
--- server-side replayDungeon recovery. Anything below 1000 ms is tolerated
--- and the replay keeps running normally.
+-- server-side replayDungeon recovery.
 local HIGH_PING_THRESHOLD = 1.0
 local NORMAL_PING_THRESHOLD = 0.18
 local HIGH_PING_SERVER_REPLAY_DELAY = 0
@@ -128,7 +120,6 @@ local function ReadValueObject(Object)
 end
 
 local function FindDungeonField(FieldName)
-	-- Exact locations discovered by DungeonStateFinder.
 	local ExactObjects = {
 		dungeonStarted = workspace:FindFirstChild("dungeonStarted"),
 		dungeonProgress = workspace:FindFirstChild("dungeonProgress"),
@@ -163,7 +154,6 @@ local function FindDungeonField(FieldName)
 		end
 	end
 
-	-- Fallback for recreated/moved replicated objects.
 	local Containers = {
 		workspace,
 		Player,
@@ -248,9 +238,6 @@ local function FireAutoStart()
 		LastAutoStartFire = Now
 		AutoStartPending = true
 
-		-- Saved-recording Auto Replay is intentionally separate from the
-		-- dungeon replayDungeon automation. It starts exactly 6 seconds
-		-- after Auto Start successfully fires.
 		if AutoReplayRecording then
 			AutoReplayRecordingAt = Now + AUTO_REPLAY_RECORDING_DELAY
 			AutoReplayRecordingRetryCount = 0
@@ -268,8 +255,6 @@ end
 local function FireAutoReplay(State)
 	local Progress = tostring(State.dungeonProgress or "")
 
-	-- Only fire when the actual discovered Workspace.dungeonProgress says bossKilled.
-	-- Reset the one-shot lock after progress changes so the same dungeon can replay again.
 	if Progress ~= "bossKilled" then
 		LastAutoReplayKey = nil
 		return
@@ -314,10 +299,6 @@ local function FireAutoReplay(State)
 
 	print("[Replay] bossKilled detected!")
 	print("[Replay] dungeonName:", DungeonName)
-	print("[Replay] dungeonStarted:", DungeonStarted)
-	print("[Replay] dungeonFinished:", DungeonFinished)
-	print("[Replay] hardcore:", Hardcore)
-	print("[Replay] fightingBoss:", FightingBoss)
 
 	local Success, ErrorMessage = pcall(function()
 		if not ReplayDungeon then
@@ -335,8 +316,6 @@ local function FireAutoReplay(State)
 end
 
 local function FireHighPingDungeonReplay(State)
-	-- Ping has hit the emergency threshold (default 1000 ms). Requeue the
-	-- dungeon immediately so the game migrates us to a healthier server.
 	local DungeonName = State.dungeonName
 	if DungeonName == nil or tostring(DungeonName) == "" then
 		warn("[Replay] High ping recovery: dungeonName is unavailable.")
@@ -401,15 +380,6 @@ local TARGET_REACHED_DISTANCE = 3
 local STUCK_TIME = 0.85
 local STUCK_MIN_MOVEMENT = 0.45
 
-local PATH_LOOKAHEAD_POINTS = 15
-local AGENT_RADIUS = 2
-local AGENT_HEIGHT = 5
-local WAYPOINT_SPACING = 3
-local WAYPOINT_REACHED_DISTANCE = 2.5
-
-local PATH_RECALCULATE_DELAY = 0.35
-local PATH_TIMEOUT = 3
-
 --------------------------------------------------
 -- SKILLS
 --------------------------------------------------
@@ -441,8 +411,6 @@ local function ConnectRespawnRecording(HumanoidToWatch)
 	ConnectedDeathHumanoid = HumanoidToWatch
 
 	HumanoidToWatch.Died:Connect(function()
-		-- Capture the respawn at death time, not CharacterAdded time.
-		-- CharacterAdded fires only after Roblox's respawn delay.
 		if not IsRecording or not CurrentRecording or not RecordRespawns then
 			return
 		end
@@ -636,7 +604,6 @@ local function CloudRequest(Method, Url, Body)
 		Method = Method,
 		Headers = headers,
 		Body = Body,
-		-- lowercase aliases help with some request implementations
 		url = Url,
 		method = Method,
 		headers = headers,
@@ -728,8 +695,6 @@ local function SaveCloud(force)
 		CloudBusy = false
 		CloudUIRefresh()
 
-		-- If a recording/settings change happened while the previous request was
-		-- in progress, immediately send the newest state too.
 		if CloudSavePending then
 			CloudSavePending = false
 			SaveCloud(true)
@@ -769,14 +734,13 @@ local function LoadCloud()
 				AutoReplayRecordingName = nil
 			end
 			if settings.autoSave ~= nil then AutoSave = settings.autoSave == true end
-		if settings.recordRespawns ~= nil then RecordRespawns = settings.recordRespawns == true end
+			if settings.recordRespawns ~= nil then RecordRespawns = settings.recordRespawns == true end
 
 			SelectedRecording = nil
 			if #Recordings > 0 then
 				SelectedRecording = Recordings[1]
 			end
 
-			-- Restore the exact recording assigned to Auto Replay Recording.
 			if AutoReplayRecordingName then
 				local FoundAutoReplayRecording = false
 				for _, Recording in ipairs(Recordings) do
@@ -817,24 +781,12 @@ end
 
 local RecordingCounter = 0
 
-local MovementMode = "MoveTo"
-
 local CurrentTarget = nil
-
 local LastMoveCommand = 0
 
 local LastStuckCheck = 0
 local LastStuckPosition = nil
 local StuckStartTime = nil
-
-local CurrentPath = nil
-local CurrentWaypoints = {}
-local CurrentWaypointIndex = 1
-local PathBlockedConnection = nil
-local PathStartedTime = 0
-local LastPathCalculation = 0
-
-local NeedNewPath = false
 
 local ReplayMovementIndex = 1
 local ReplayStartPositioning = false
@@ -844,8 +796,6 @@ local LastRecordTime = 0
 -- Respawn/replay synchronization
 local ReplayRespawnPending = false
 local ReplayRespawnIndex = nil
--- Combined into a single table (instead of two separate top-level locals)
--- to stay under Luau's 200 local-register limit for the main chunk.
 local ReplayState = {
 	RespawnTime = nil,
 	ActiveRecording = nil,
@@ -862,19 +812,12 @@ local ReplayState = {
 
 	-- Tracks where the character respawned last time. If the character
 	-- respawns at the SAME position again, the previous room was never
-	-- cleared (clearing a room is what advances the spawn forward). In
-	-- that case the replay backtracks to just after the previous Respawn
-	-- action so this room's movement + Q/E actions get replayed again
-	-- until the room actually clears.
+	-- cleared. Backtrack to just after the previous Respawn action so
+	-- this room's clearing actions get replayed again.
 	RespawnPositionTolerance = 8,
 	LastRespawnPosition = nil,
 }
 
--- Combines a time-based lookup (reliable, keeps the correct ordering
--- through multiple deaths) with a scoped, forward-only position check
--- (skips past any movement points frozen at the death location while the
--- character was waiting to respawn). Never searches backward, so it can
--- never rewind into an earlier point in the recording.
 function ReplayState.FindResumeIndex(Recording, RespawnTime, CurrentPosition)
 
 	if not Recording
@@ -916,10 +859,6 @@ function ReplayState.FindResumeIndex(Recording, RespawnTime, CurrentPosition)
 
 end
 
--- Returns the time of the most recent Respawn action strictly BEFORE
--- BeforeTime, or nil if there is no earlier Respawn action. Used to
--- backtrack the replay when a room failed to clear (same respawn
--- position detected twice in a row).
 function ReplayState.FindPreviousRespawnTime(Recording, BeforeTime)
 
 	if not Recording
@@ -953,7 +892,6 @@ end
 
 local RecordingRespawnPending = false
 
-local SkillActionIndex = 1
 local SKILL_POSITION_TOLERANCE = 3.5
 
 --------------------------------------------------
@@ -1092,10 +1030,6 @@ local function StartRecording(Name)
 		return
 	end
 
-	--------------------------------------------------
-	-- CREATE A COMPLETELY NEW RECORDING
-	--------------------------------------------------
-
 	RecordingCounter += 1
 
 	if not Name
@@ -1122,10 +1056,8 @@ local function StartRecording(Name)
 		Duration = 0
 	}
 
-	-- Reset recording timer
 	LastRecordTime = 0
 
-	-- Reset movement tracking
 	LastStuckPosition = nil
 	StuckStartTime = nil
 
@@ -1157,21 +1089,12 @@ local function StopRecording()
 		return
 	end
 
-	--------------------------------------------------
-	-- SAVE THE CURRENT RECORDING
-	--------------------------------------------------
-
 	local FinishedRecording =
 		CurrentRecording
 
 	FinishedRecording.Duration =
 		os.clock()
 		- FinishedRecording.StartTime
-
-	--------------------------------------------------
-	-- IMPORTANT:
-	-- INSERT THIS RECORDING INTO THE TABLE
-	--------------------------------------------------
 
 	if #FinishedRecording.Movement > 0 then
 
@@ -1180,7 +1103,6 @@ local function StopRecording()
 			FinishedRecording
 		)
 
-		-- Automatically select the newly-created recording
 		SelectedRecording =
 			FinishedRecording
 
@@ -1202,15 +1124,10 @@ local function StopRecording()
 
 	end
 
-	--------------------------------------------------
-	-- CLEAR CURRENT RECORDING
-	--------------------------------------------------
-
 	CurrentRecording = nil
 
 	IsRecording = false
 
-	-- Persist the newly completed recording.
 	SaveCloud(false)
 
 	LastRecordTime = 0
@@ -1235,10 +1152,6 @@ local function RecordMovement()
 		return
 	end
 
-	-- Don't log movement while dead/ragdolled and waiting to respawn.
-	-- Otherwise this keeps sampling the corpse's frozen position for the
-	-- whole respawn delay, baking a "detour to the death spot" into the
-	-- recording that replay would otherwise have to path through later.
 	if not RootPart.Parent then
 		return
 	end
@@ -1344,355 +1257,7 @@ UserInputService.InputBegan:Connect(
 )
 
 --------------------------------------------------
--- PATHFINDING
---------------------------------------------------
-
-local function ClearPath()
-
-	if PathBlockedConnection then
-
-		PathBlockedConnection:Disconnect()
-
-		PathBlockedConnection = nil
-
-	end
-
-	CurrentPath = nil
-
-	CurrentWaypoints = {}
-
-	CurrentWaypointIndex = 1
-
-end
-
-local function ComputePath(TargetPosition)
-
-	if not RootPart then
-		return false
-	end
-
-	local Now =
-		os.clock()
-
-	if Now - LastPathCalculation <
-		PATH_RECALCULATE_DELAY then
-
-		return false
-	end
-
-	LastPathCalculation = Now
-
-	local Path =
-		PathfindingService:CreatePath(
-			{
-				AgentRadius =
-					AGENT_RADIUS,
-
-				AgentHeight =
-					AGENT_HEIGHT,
-
-				AgentCanJump =
-					true,
-
-				WaypointSpacing =
-					WAYPOINT_SPACING
-			}
-		)
-
-	local Success =
-		pcall(
-			function()
-
-				Path:ComputeAsync(
-					RootPart.Position,
-					TargetPosition
-				)
-
-			end
-		)
-
-	if not Success then
-		return false
-	end
-
-	if Path.Status ~=
-		Enum.PathStatus.Success then
-
-		return false
-	end
-
-	local Waypoints =
-		Path:GetWaypoints()
-
-	if #Waypoints < 2 then
-		return false
-	end
-
-	ClearPath()
-
-	CurrentPath =
-		Path
-
-	CurrentWaypoints =
-		Waypoints
-
-	CurrentWaypointIndex =
-		2
-
-	PathStartedTime =
-		Now
-
-	PathBlockedConnection =
-		Path.Blocked:Connect(
-			function(BlockedIndex)
-
-				if BlockedIndex >=
-					CurrentWaypointIndex then
-
-					NeedNewPath = true
-
-				end
-
-			end
-		)
-
-	NeedNewPath = false
-
-	return true
-end
-
-local function EnterPathfinding(TargetPosition)
-
-	if not RootPart then
-		return
-	end
-
-	local Success =
-		ComputePath(
-			TargetPosition
-		)
-
-	if Success then
-
-		MovementMode =
-			"Pathfinding"
-
-		print(
-			"[Replay] MoveTo stuck -> Pathfinding"
-		)
-
-	else
-
-		MovementMode =
-			"MoveTo"
-
-	end
-
-end
-
-local function UpdatePathMovement()
-
-	if MovementMode ~=
-		"Pathfinding" then
-
-		return
-	end
-
-	if not RootPart
-		or not Humanoid then
-
-		return
-	end
-
-	if not CurrentPath
-		or #CurrentWaypoints == 0 then
-
-		MovementMode =
-			"MoveTo"
-
-		return
-	end
-
-	if os.clock() - PathStartedTime >
-		PATH_TIMEOUT then
-
-		ClearPath()
-
-		MovementMode =
-			"MoveTo"
-
-		return
-	end
-
-	if NeedNewPath then
-
-		NeedNewPath = false
-
-		if CurrentTarget then
-
-			ComputePath(
-				CurrentTarget
-			)
-
-		else
-
-			MovementMode =
-				"MoveTo"
-
-		end
-
-		return
-	end
-
-	local Waypoint =
-		CurrentWaypoints[
-			CurrentWaypointIndex
-		]
-
-	if not Waypoint then
-
-		ClearPath()
-
-		MovementMode =
-			"MoveTo"
-
-		return
-	end
-
-	local Distance =
-		(
-			RootPart.Position
-			- Waypoint.Position
-		).Magnitude
-
-	if Distance <=
-		WAYPOINT_REACHED_DISTANCE then
-
-		CurrentWaypointIndex += 1
-
-		Waypoint =
-			CurrentWaypoints[
-				CurrentWaypointIndex
-			]
-
-		if not Waypoint then
-
-			ClearPath()
-
-			MovementMode =
-				"MoveTo"
-
-			return
-		end
-
-	end
-
-	if Waypoint.Action ==
-		Enum.PathWaypointAction.Jump then
-
-		Humanoid.Jump = true
-
-	end
-
-	if os.clock()
-		- LastMoveCommand >=
-		MOVETO_REFRESH then
-
-		Humanoid:MoveTo(
-			Waypoint.Position
-		)
-
-		LastMoveCommand =
-			os.clock()
-
-	end
-
-end
-
---------------------------------------------------
--- STUCK DETECTION
---------------------------------------------------
-
-local function CheckStuck(TargetPosition)
-
-	if not RootPart then
-		return
-	end
-
-	if MovementMode ==
-		"Pathfinding" then
-
-		return
-	end
-
-	local Now =
-		os.clock()
-
-	if Now - LastStuckCheck <
-		0.25 then
-
-		return
-	end
-
-	LastStuckCheck =
-		Now
-
-	local CurrentPosition =
-		RootPart.Position
-
-	if not LastStuckPosition then
-
-		LastStuckPosition =
-			CurrentPosition
-
-		StuckStartTime =
-			Now
-
-		return
-	end
-
-	local MovementDistance =
-		(
-			CurrentPosition
-			- LastStuckPosition
-		).Magnitude
-
-	if MovementDistance >=
-		STUCK_MIN_MOVEMENT then
-
-		LastStuckPosition =
-			CurrentPosition
-
-		StuckStartTime =
-			Now
-
-		return
-	end
-
-	if StuckStartTime
-		and Now - StuckStartTime >=
-		STUCK_TIME then
-
-		if TargetPosition then
-
-			EnterPathfinding(
-				TargetPosition
-			)
-
-		end
-
-		LastStuckPosition =
-			CurrentPosition
-
-		StuckStartTime =
-			Now
-
-	end
-
-end
-
---------------------------------------------------
--- MOVE TO
+-- MOVE TO (direct, no pathfinding)
 --------------------------------------------------
 
 local function MoveToTarget(TargetPosition)
@@ -1705,14 +1270,6 @@ local function MoveToTarget(TargetPosition)
 
 	CurrentTarget =
 		TargetPosition
-
-	if MovementMode ==
-		"Pathfinding" then
-
-		UpdatePathMovement()
-
-		return
-	end
 
 	local Distance =
 		(
@@ -1738,10 +1295,6 @@ local function MoveToTarget(TargetPosition)
 			os.clock()
 
 	end
-
-	CheckStuck(
-		TargetPosition
-	)
 
 end
 
@@ -1820,11 +1373,6 @@ local function ReplayActionsBetween(
 
 				local ShouldFire = false
 
-				-- New recordings store the exact position where the skill
-				-- was pressed. Once replay reaches the recorded timestamp,
-				-- wait until the character actually reaches that position.
-				-- This prevents skills from firing early when movement is
-				-- temporarily behind the replay clock.
 				if Action.Position and RootPart then
 					local Distance =
 						(RootPart.Position - Action.Position).Magnitude
@@ -1832,8 +1380,6 @@ local function ReplayActionsBetween(
 					ShouldFire =
 						Distance <= SKILL_POSITION_TOLERANCE
 				else
-					-- Old cloud recordings do not have a position anchor,
-					-- so they continue using the original time-based replay.
 					ShouldFire = Action.Time > OldTime
 				end
 				if ShouldFire then
@@ -1864,17 +1410,12 @@ local function ReplayActionsBetween(
 					and Humanoid.Parent
 					and Humanoid.Health > 0 then
 
-					-- Remember the exact recorded death time. After the new
-					-- character spawns, replay resumes AFTER this action instead
-					-- of finding a nearby point that could be before the death.
 					ReplayState.RespawnTime = Action.Time or 0
 
 					pcall(function()
 						Humanoid.Health = 0
 					end)
 
-					-- Mark it immediately so the same respawn action can never
-					-- be fired again after CharacterAdded.
 					Action._Replayed = true
 
 				end
@@ -1908,11 +1449,6 @@ local function ReplayMovement(
 	IsReplaying =
 		true
 
-	MovementMode =
-		"MoveTo"
-
-	ClearPath()
-
 	LastStuckPosition =
 		nil
 
@@ -1926,10 +1462,7 @@ local function ReplayMovement(
 		Action._Replayed = nil
 	end
 
-	-- Hard cap so a stuck replay (e.g. the character can never physically
-	-- reach the last recorded position) cannot block the auto replay
-	-- scheduler forever. Uses the recording's own duration plus a generous
-	-- buffer for pathfinding detours and respawn waits.
+	-- Hard cap so a stuck replay cannot block the auto replay scheduler.
 	local RecordingDuration =
 		Recording.Duration
 		or (Movement[#Movement] and Movement[#Movement].Time)
@@ -1965,23 +1498,14 @@ local function ReplayMovement(
 	local RealStart =
 		os.clock()
 
-	-- Tracks the replay clock as of the last frame the character was alive.
-	-- Real (unscripted) deaths -- e.g. the bot actually dying in combat --
-	-- never set ReplayState.RespawnTime via a recorded "Respawn" action, so
-	-- without this, resume falls back to FindNearestMovementIndex, which is
-	-- unreliable: Roblox always respawns at a fixed spawn point, not at the
-	-- death location, so proximity search tends to snap back to whichever
-	-- recorded point is nearest that spawn pad (often near the very start
-	-- of the recording) instead of continuing where playback left off.
 	local LastKnownReplayTime =
 		StartTime
 
 	while IsReplaying do
 
 		-- Absolute safety valve: if a replay has been running far longer
-		-- than the recording itself, something is stuck (unreachable
-		-- target, pathfinding loop, blocked character, etc.). Break out
-		-- so the auto replay scheduler is not blocked forever.
+		-- than the recording itself, something is stuck. Break out so the
+		-- auto replay scheduler is not blocked forever.
 		if os.clock() - ReplayRealStart > ReplayMaxDuration then
 			warn(string.format(
 				"[Replay] Timeout: replay ran %.0fs (max %.0fs) - force stopping",
@@ -1991,12 +1515,6 @@ local function ReplayMovement(
 			break
 		end
 
-		-- NOTE: ping is intentionally NOT checked here anymore. The replay
-		-- keeps running through moderate latency (300-999 ms) without pausing.
-		-- Only a full-second spike triggers the emergency replayDungeon call
-		-- in the dungeon scanner, which migrates the player to a new server
-		-- and terminates this replay naturally.
-
 		if not Character
 			or not Character.Parent
 			or not Humanoid
@@ -2005,37 +1523,17 @@ local function ReplayMovement(
 			or not RootPart.Parent
 			or Humanoid.Health <= 0 then
 
-			-- Record where we were in the recording at the moment of death,
-			-- even if this death was not a scripted Respawn action (e.g. the
-			-- bot actually died in combat). This guarantees CharacterAdded
-			-- always has a reliable time-based resume point and never has to
-			-- fall back to physical-proximity matching.
 			if not ReplayState.RespawnTime then
 				ReplayState.RespawnTime = LastKnownReplayTime
 			end
 
-			-- IMPORTANT: do not let replay time continue while dead.
-			-- Otherwise all Q/E actions can be consumed before respawn.
 			task.wait(0.1)
 			continue
 		end
 
-		-- A new character has spawned. Resume the replay from the
-		-- movement point AFTER the recorded respawn time. Do not use
-		-- physical proximity here because the spawn location can be near
-		-- an earlier point in the recording, which would replay the same
-		-- Respawn action again and cause an infinite reset loop.
 		if ReplayRespawnPending then
 			local ResumeIndex = ReplayRespawnIndex
 
-			-- The actual moment of death/respawn -- NOT the coarser resume
-			-- movement point below -- is the correct cutoff for deciding
-			-- which actions still need to be replayed. Movement points are
-			-- only sampled periodically, so the nearest one at/after death
-			-- can land noticeably later than the death itself. Any skill
-			-- the original player cast in that gap (e.g. right after
-			-- respawning, before the next movement sample) has a Time
-			-- earlier than the movement point but is still owed a replay.
 			local ActionResetAnchorTime = ReplayState.RespawnTime
 
 			if not ResumeIndex and ReplayState.RespawnTime then
@@ -2067,16 +1565,12 @@ local function ReplayMovement(
 			LastKnownReplayTime = StartTime
 			RealStart = os.clock()
 
-			ClearPath()
-			MovementMode = "MoveTo"
 			CurrentTarget = nil
 			LastMoveCommand = 0
 			LastStuckCheck = 0
 			LastStuckPosition = RootPart.Position
 			StuckStartTime = os.clock()
 
-			-- Fall back to StartTime only if we never had a precise death
-			-- time to begin with (e.g. FindNearestMovementIndex was used).
 			ActionResetAnchorTime = ActionResetAnchorTime or StartTime
 
 			for _, Action in ipairs(Recording.Actions or {}) do
@@ -2179,8 +1673,6 @@ local function ReplayMovement(
 		PreviousTime =
 			ReplayTime
 
-		-- Character is alive and this frame completed normally, so this is
-		-- a good known-safe point to resume from if death happens later.
 		LastKnownReplayTime =
 			ReplayTime
 
@@ -2227,11 +1719,6 @@ local function ReplayMovement(
 	ReplayState.RespawnTime = nil
 	ReplayState.LastRespawnPosition = nil
 
-	ClearPath()
-
-	MovementMode =
-		"MoveTo"
-
 	CurrentTarget =
 		nil
 
@@ -2245,6 +1732,9 @@ end
 --------------------------------------------------
 -- WAIT FOR REPLAY START POSITION
 --------------------------------------------------
+-- Direct MoveTo only. No pathfinding. Gives up if the character stops
+-- making progress toward the target so the auto replay scheduler is
+-- never blocked by an unreachable first point.
 
 local function WaitForReplayStartPosition(Recording)
 	if not Recording
@@ -2260,11 +1750,12 @@ local function WaitForReplayStartPosition(Recording)
 
 	local TargetPosition = FirstPoint.Position
 	local StartWait = os.clock()
-	local LastDirectMove = 0
-	local LastPathTry = 0
-	local PositioningPath = nil
-	local PositioningWaypoints = {}
-	local PositioningWaypointIndex = 1
+	local LastMove = 0
+
+	local StuckLastPos = nil
+	local StuckStart = nil
+	local STUCK_ABORT_SECONDS = 6
+	local STUCK_MIN_PROGRESS = 0.5
 
 	while ReplayStartPositioning and os.clock() - StartWait < 30 do
 		if not Character
@@ -2283,56 +1774,32 @@ local function WaitForReplayStartPosition(Recording)
 			return true
 		end
 
-		if PositioningPath and PositioningWaypointIndex <= #PositioningWaypoints then
-			local Waypoint = PositioningWaypoints[PositioningWaypointIndex]
-
-			if (RootPart.Position - Waypoint.Position).Magnitude <= TARGET_REACHED_DISTANCE then
-				PositioningWaypointIndex += 1
-				Waypoint = PositioningWaypoints[PositioningWaypointIndex]
-			end
-
-			if Waypoint then
-				if Waypoint.Action == Enum.PathWaypointAction.Jump then
-					Humanoid.Jump = true
-				end
-				Humanoid:MoveTo(Waypoint.Position)
-			end
-		else
-			PositioningPath = nil
-			PositioningWaypoints = {}
-			PositioningWaypointIndex = 1
-
-			if os.clock() - LastPathTry >= PATH_RECALCULATE_DELAY then
-				LastPathTry = os.clock()
-
-				local Path = PathfindingService:CreatePath({
-					AgentRadius = AGENT_RADIUS,
-					AgentHeight = AGENT_HEIGHT,
-					AgentCanJump = true,
-					WaypointSpacing = WAYPOINT_SPACING
-				})
-
-				local Success = pcall(function()
-					Path:ComputeAsync(RootPart.Position, TargetPosition)
-				end)
-
-				if Success and Path.Status == Enum.PathStatus.Success then
-					local Waypoints = Path:GetWaypoints()
-					if #Waypoints >= 2 then
-						PositioningPath = Path
-						PositioningWaypoints = Waypoints
-						PositioningWaypointIndex = 2
-					end
-				end
-			end
-
-			if not PositioningPath and os.clock() - LastDirectMove >= MOVETO_REFRESH then
-				Humanoid:MoveTo(TargetPosition)
-				LastDirectMove = os.clock()
-			end
+		if os.clock() - LastMove >= MOVETO_REFRESH then
+			Humanoid:MoveTo(TargetPosition)
+			LastMove = os.clock()
 		end
 
-		task.wait()
+		-- Stuck detection: if we haven't made progress toward the target
+		-- for STUCK_ABORT_SECONDS, give up so the caller isn't blocked.
+		local CurrentPos = RootPart.Position
+		if not StuckLastPos then
+			StuckLastPos = CurrentPos
+			StuckStart = os.clock()
+		elseif (CurrentPos - StuckLastPos).Magnitude < STUCK_MIN_PROGRESS then
+			if StuckStart and os.clock() - StuckStart > STUCK_ABORT_SECONDS then
+				warn(string.format(
+					"[Replay] Could not reach first position (stuck for %.1fs, %.0f studs away) - aborting positioning",
+					os.clock() - StuckStart,
+					Distance
+				))
+				return false
+			end
+		else
+			StuckLastPos = CurrentPos
+			StuckStart = os.clock()
+		end
+
+		task.wait(0.05)
 	end
 
 	return false
@@ -2421,11 +1888,6 @@ local function StopReplay()
 	ReplayState.RespawnTime = nil
 	ReplayState.LastRespawnPosition = nil
 
-	ClearPath()
-
-	MovementMode =
-		"MoveTo"
-
 	CurrentTarget =
 		nil
 
@@ -2442,13 +1904,10 @@ end
 Player.CharacterAdded:Connect(
 	function(NewCharacter)
 
-		-- Refresh every character reference. The old Humanoid/RootPart
-		-- are destroyed when the player dies.
 		SetupCharacter(
 			NewCharacter
 		)
 
-		-- Backpack can be repopulated during respawn. Refresh it too.
 		GetBackpack()
 
 		RecordingRespawnPending = false
@@ -2462,7 +1921,6 @@ Player.CharacterAdded:Connect(
 			return
 		end
 
-		-- Wait for the new character and its skill tools to finish spawning.
 		task.wait(0.75)
 
 		if not RootPart or not RootPart.Parent then
@@ -2472,13 +1930,6 @@ Player.CharacterAdded:Connect(
 		local CurrentPosition = RootPart.Position
 		local ResumeTime = ReplayState.RespawnTime
 
-		-- Same-spot respawn detection: if the character respawned at the
-		-- exact same place as the previous respawn, the room never got
-		-- cleared. Instead of advancing the replay clock forward (which
-		-- leaves the character pathing to positions in a room it never
-		-- reached), backtrack to just after the PREVIOUS respawn action
-		-- so this room's clearing movement + Q/E actions are replayed
-		-- again until the room actually clears and the spawn advances.
 		if ResumeTime
 			and ReplayState.LastRespawnPosition
 			and (CurrentPosition - ReplayState.LastRespawnPosition).Magnitude
@@ -2523,10 +1974,6 @@ Player.CharacterAdded:Connect(
 		ReplayMovementIndex = ResumeIndex
 		ReplayRespawnIndex = ResumeIndex
 
-		-- Use the (possibly backtracked) ResumeTime as the action-reset
-		-- anchor in the ReplayMovement pending block, so actions between
-		-- the previous respawn and now are marked un-replayed and get
-		-- re-fired. This is what makes the room get cleared a second time.
 		ReplayState.RespawnTime = ResumeTime
 
 		ReplayRespawnPending = true
@@ -2552,22 +1999,15 @@ ScreenGui.Name =
 ScreenGui.ResetOnSpawn =
 	false
 
--- Defensive UI settings: keep the replay panel visible even if another
--- PlayerGui is using a high DisplayOrder or the Roblox top-bar inset changes.
 ScreenGui.Enabled = true
 ScreenGui.IgnoreGuiInset = true
 ScreenGui.DisplayOrder = 999
 ScreenGui.ZIndexBehavior =
 	Enum.ZIndexBehavior.Sibling
 
--- Scoped in a do...end block so PlayerGui/ExistingGui free their registers
--- immediately instead of staying live for the rest of the script (the UI
--- section below already uses close to Luau's 200 local-register limit).
 do
 	local PlayerGui = Player:WaitForChild("PlayerGui")
 
-	-- Prevent duplicate copies of the UI from stacking when the script is
-	-- re-executed without restarting the character.
 	for _, ExistingGui in ipairs(PlayerGui:GetChildren()) do
 		if ExistingGui ~= ScreenGui
 			and ExistingGui:IsA("ScreenGui")
@@ -3064,9 +2504,6 @@ MinimizeButton.MouseButton1Click:Connect(
 -- MOBILE + PC DRAGGING
 --------------------------------------------------
 
--- Use a dedicated drag handle instead of Header.InputBegan.
--- Header.InputBegan + Input.Target is unreliable and InputObject
--- does not provide a dependable Target property for this use.
 local DragHandle =
 	Instance.new("Frame")
 
@@ -3102,8 +2539,6 @@ DragHandle.ZIndex =
 DragHandle.Parent =
 	Header
 
--- Keep the title/version visible above the handle while still allowing
--- the transparent handle to receive input.
 Title.ZIndex = 11
 VersionLabel.ZIndex = 11
 
@@ -3168,9 +2603,6 @@ DragHandle.InputChanged:Connect(
 	end
 )
 
--- Forward title/version touches to the same drag system.
--- This makes dragging reliable even when the text itself is the
--- topmost GUI object under the finger/cursor.
 local function ConnectDragObject(Object)
 	Object.InputBegan:Connect(function(Input)
 		if Input.UserInputType == Enum.UserInputType.MouseButton1
@@ -4173,7 +3605,6 @@ DeleteConfirmYes.MouseButton1Click:Connect(function()
 		end
 	end
 
-	-- Keep both recording selectors valid after deletion.
 	if SelectedRecording == Recording then
 		SelectedRecording = Recordings[1]
 	end
@@ -4192,7 +3623,6 @@ DeleteConfirmYes.MouseButton1Click:Connect(function()
 	end
 	UpdateUI()
 
-	-- Force the deletion to cloud immediately, even if Cloud Auto Save is OFF.
 	SaveCloud(true)
 
 	print("[Replay] Deleted recording:", tostring(Recording.Name))
@@ -4204,10 +3634,6 @@ end)
 
 local function RefreshRecordingList()
 
-	--------------------------------------------------
-	-- REMOVE OLD ROWS
-	--------------------------------------------------
-
 	for _, Child in ipairs(
 		RecordingList:GetChildren()
 	) do
@@ -4217,10 +3643,6 @@ local function RefreshRecordingList()
 		end
 
 	end
-
-	--------------------------------------------------
-	-- COUNT
-	--------------------------------------------------
 
 	SavedCount.Text =
 		tostring(
@@ -4232,10 +3654,6 @@ local function RefreshRecordingList()
 			and " recording"
 			or " recordings"
 		)
-
-	--------------------------------------------------
-	-- SELECTED
-	--------------------------------------------------
 
 	if SelectedRecording then
 
@@ -4250,10 +3668,6 @@ local function RefreshRecordingList()
 			"Selected: None"
 
 	end
-
-	--------------------------------------------------
-	-- EMPTY STATE
-	--------------------------------------------------
 
 	if #Recordings == 0 then
 
@@ -4280,10 +3694,6 @@ local function RefreshRecordingList()
 
 		return
 	end
-
-	--------------------------------------------------
-	-- CREATE EVERY RECORDING
-	--------------------------------------------------
 
 	for Index, Recording in ipairs(
 		Recordings
@@ -4333,10 +3743,6 @@ local function RefreshRecordingList()
 
 		end
 
-		--------------------------------------------------
-		-- NUMBER
-		--------------------------------------------------
-
 		local Number =
 			CreateLabel(
 				Row,
@@ -4355,10 +3761,6 @@ local function RefreshRecordingList()
 
 		Number.TextXAlignment =
 			Enum.TextXAlignment.Center
-
-		--------------------------------------------------
-		-- NAME
-		--------------------------------------------------
 
 		local Name =
 			CreateLabel(
@@ -4380,10 +3782,6 @@ local function RefreshRecordingList()
 
 		Name.Font =
 			Enum.Font.GothamMedium
-
-		--------------------------------------------------
-		-- INFO
-		--------------------------------------------------
 
 		local Info =
 			CreateLabel(
@@ -4413,10 +3811,6 @@ local function RefreshRecordingList()
 				SUBTEXT
 			)
 
-		--------------------------------------------------
-		-- CHECK
-		--------------------------------------------------
-
 		if IsSelected then
 
 			local Check =
@@ -4442,10 +3836,6 @@ local function RefreshRecordingList()
 
 		end
 
-		--------------------------------------------------
-		-- DELETE
-		--------------------------------------------------
-
 		local DeleteButton = Instance.new("TextButton")
 		DeleteButton.Size = UDim2.fromOffset(32, 32)
 		DeleteButton.Position = UDim2.new(1, -37, 0, 6)
@@ -4464,10 +3854,6 @@ local function RefreshRecordingList()
 			end
 			OpenDeleteConfirmation(Recording)
 		end)
-
-		--------------------------------------------------
-		-- CLICK
-		--------------------------------------------------
 
 		local Click =
 			Instance.new(
@@ -4790,7 +4176,6 @@ AutoStartButton.MouseButton1Click:Connect(function()
 		AutoReplayRecordingRetryCount = 0
 	end
 	UpdateDungeonButtons()
-	-- Settings must be cloud-persistent even when Cloud Auto Save is OFF.
 	SaveCloud(true)
 end)
 
@@ -4800,7 +4185,6 @@ AutoReplayButton.MouseButton1Click:Connect(function()
 		LastAutoReplayKey = nil
 	end
 	UpdateDungeonButtons()
-	-- Settings must be cloud-persistent even when Cloud Auto Save is OFF.
 	SaveCloud(true)
 end)
 
@@ -4820,7 +4204,6 @@ AutoReplayRecordingButton.MouseButton1Click:Connect(function()
 		AutoReplayRecordingDungeonKey = nil
 	end
 	UpdateDungeonButtons()
-	-- Persist this setting independently of the Cloud Auto Save toggle.
 	SaveCloud(true)
 end)
 
@@ -4875,12 +4258,8 @@ end)
 UpdateDungeonButtons()
 UpdateCloudButtons()
 
--- Show cloud status using the existing status label once the UI is ready.
 CloudUIRefresh = function()
 	RefreshRecordingList()
-	-- Keep the Auto Replay Current label synchronized with the actual
-	-- AutoReplayRecordingName value restored/used by the replay system.
-	-- This is intentionally separate from the normal SelectedRecording UI.
 	if UpdateAutoReplayCurrentButton then
 		UpdateAutoReplayCurrentButton()
 	end
@@ -4889,9 +4268,6 @@ CloudUIRefresh = function()
 	UpdateUI()
 end
 
--- Automatically restore cloud recordings/settings every time the script starts.
--- The dungeon automation loop is blocked until this finishes, so saved OFF
--- settings cannot be overwritten by the local defaults.
 task.delay(0.25, function()
 	if not CloudLoaded then
 		LoadCloud()
@@ -5316,7 +4692,6 @@ StopButton.MouseButton1Click:Connect(
 
 			StopRecording()
 
-			-- THIS NOW REFRESHES EVERY TIME
 			RefreshRecordingList()
 
 			UpdateUI()
@@ -5366,9 +4741,6 @@ ReplayButton.MouseButton1Click:Connect(
 
 task.spawn(function()
 	while true do
-		-- NEVER run auto-start/auto-replay until the cloud settings have loaded.
-		-- This prevents the LocalScript defaults from firing before the saved
-		-- Auto Start / Auto Replay values arrive from Cloudflare.
 		if not CloudLoaded then
 			task.wait(DUNGEON_SCAN_INTERVAL)
 			continue
@@ -5381,9 +4753,6 @@ task.spawn(function()
 
 		local State = GetDungeonState()
 
-		-- Track continuous high ping. Only a full second (HIGH_PING_THRESHOLD)
-		-- triggers the emergency requeue. Anything below that is tolerated and
-		-- the replay keeps running normally.
 		local CurrentPingHigh = IsPingHigh()
 		if CurrentPingHigh then
 			if not HighPingSince then
@@ -5411,8 +4780,6 @@ task.spawn(function()
 			tostring(State.dungeonStarted == true)
 		)
 
-		-- Detect every dungeon start as a new cycle. The dungeon name alone is
-		-- not enough because the same dungeon can be started repeatedly.
 		local DungeonStartedNow = State.dungeonStarted == true
 		if DungeonStartedNow and LastDungeonStartedState ~= true then
 			DungeonStartCycle += 1
@@ -5424,8 +4791,6 @@ task.spawn(function()
 		if DungeonStartedNow then
 			AutoStartPending = false
 
-			-- Schedule even if another replay is currently running. The execution
-			-- section below will wait until the character is free.
 			if AutoReplayRecording then
 				local DungeonKey = tostring(State.dungeonName or "Unknown") .. "#" .. tostring(DungeonStartCycle)
 				if AutoReplayRecordingDungeonKey ~= DungeonKey and not AutoReplayRecordingAt then
@@ -5440,14 +4805,9 @@ task.spawn(function()
 				end
 			end
 		else
-			-- Clear the cycle lock when the dungeon ends so the next start can
-			-- always schedule again, even for the same dungeon name.
 			AutoReplayRecordingDungeonKey = nil
 		end
 
-		-- Emergency recovery fires immediately on the first scan tick where
-		-- ping crosses the 1-second threshold. HIGH_PING_SERVER_REPLAY_DELAY
-		-- is 0, so no extra waiting is required.
 		if CurrentPingHigh
 			and HighPingSince
 			and not HighPingServerReplayFired
@@ -5455,7 +4815,6 @@ task.spawn(function()
 			FireHighPingDungeonReplay(State)
 		end
 
-		-- Normal automation only runs when not in the emergency state.
 		if AutoStart
 			and State.dungeonStarted ~= true
 			and not AutoStartPending
@@ -5485,8 +4844,6 @@ task.spawn(function()
 					AutoReplayRecordingRetryCount += 1
 					AutoReplayRecordingAt = Now + 0.5
 
-					-- Log every 10 seconds so stalls are visible in the
-					-- output and don't silently drag on.
 					if AutoReplayRecordingRetryCount % 20 == 0 then
 						print(string.format(
 							"[Replay] Auto Replay waiting (%.0fs): another replay in progress",
@@ -5517,8 +4874,6 @@ task.spawn(function()
 							AutoReplayRecordingRetryCount * 0.5
 						))
 						StartReplay(RecordingToPlay)
-						-- StartReplay may take a moment to position the character. The
-						-- ReplayStartPositioning guard above prevents duplicate starts.
 						AutoReplayRecordingAt = nil
 						AutoReplayRecordingRetryCount = 0
 					else
@@ -5550,14 +4905,6 @@ RunService.Heartbeat:Connect(
 
 		end
 
-		if IsReplaying
-			and MovementMode ==
-			"Pathfinding" then
-
-			UpdatePathMovement()
-
-		end
-
 		if os.clock()
 			- LastUIUpdate >=
 			0.1 then
@@ -5576,7 +4923,6 @@ RunService.Heartbeat:Connect(
 -- INITIALIZE
 --------------------------------------------------
 
--- Final UI visibility safeguard.
 ScreenGui.Enabled = true
 MainFrame.Visible = true
 MainFrame.Active = true
