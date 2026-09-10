@@ -1,4 +1,4 @@
---// Replay System v3.4.0
+--// Replay System v3.5.2
 --// Cloudflare D1 recording sync integration
 --// Compact Mobile UI
 --// Multiple Recordings + Mouse/Touch Dragging
@@ -61,6 +61,10 @@ local DUNGEON_SCAN_INTERVAL = 0.35
 
 local HIGH_PING_THRESHOLD = 0.30
 local NORMAL_PING_THRESHOLD = 0.18
+local HIGH_PING_SERVER_REPLAY_DELAY = 15
+
+local HighPingSince = nil
+local HighPingServerReplayFired = false
 
 local function GetCurrentPing()
 	local Success, Ping = pcall(function()
@@ -300,11 +304,60 @@ local function FireAutoReplay(State)
 	end
 end
 
+local function FireHighPingDungeonReplay(State)
+	-- If ping stays bad for a long time before Auto Start can happen,
+	-- use replayDungeon as a recovery/requeue attempt instead of waiting forever.
+	local DungeonName = State.dungeonName
+	if DungeonName == nil or tostring(DungeonName) == "" then
+		warn("[Replay] High ping recovery: dungeonName is unavailable.")
+		return
+	end
+
+	DungeonName = tostring(DungeonName)
+
+	local Hardcore = State.hardcore == true
+	local DungeonStarted = State.dungeonStarted
+	if DungeonStarted == nil then DungeonStarted = false end
+
+	local DungeonFinished = State.dungeonFinished
+	if DungeonFinished == nil then DungeonFinished = false end
+
+	local IsHardcore = State.isHardcore
+	if IsHardcore == nil then IsHardcore = Hardcore end
+
+	local FightingBoss = State.fightingBoss
+	if FightingBoss == nil then FightingBoss = false end
+
+	local Payload = {
+		dungeonProgress = "bossKilled",
+		dungeonStarted = DungeonStarted == true,
+		dungeonFinished = DungeonFinished == true,
+		hardcore = Hardcore,
+		dungeonName = DungeonName,
+		isHardcore = IsHardcore == true,
+		fightingBoss = FightingBoss == true
+	}
+
+	local Success, ErrorMessage = pcall(function()
+		ReplayDungeon:FireServer(Payload)
+	end)
+
+	if Success then
+		HighPingServerReplayFired = true
+		AutoStartPending = false
+		AutoReplayRecordingAt = nil
+		LastAutoReplayKey = nil
+		print("[Replay] High ping persisted for " .. HIGH_PING_SERVER_REPLAY_DELAY .. "s -> replayDungeon:", DungeonName)
+	else
+		warn("[Replay] High ping recovery error:", ErrorMessage)
+	end
+end
+
 --------------------------------------------------
 -- CONFIG
 --------------------------------------------------
 
-local VERSION = "v2.7.0"
+local VERSION = "v3.6.0"
 
 local RECORD_INTERVAL = 0.05
 
@@ -1997,7 +2050,7 @@ end
 -- START REPLAY
 --------------------------------------------------
 
-local function StartReplay()
+local function StartReplay(RecordingOverride)
 
 	if IsRecording
 		or IsReplaying then
@@ -2005,7 +2058,9 @@ local function StartReplay()
 		return
 	end
 
-	if not SelectedRecording then
+	local RecordingToPlay = RecordingOverride or SelectedRecording
+
+	if not RecordingToPlay then
 
 		warn(
 			"[Replay] No recording selected"
@@ -2014,8 +2069,8 @@ local function StartReplay()
 		return
 	end
 
-	if not SelectedRecording.Movement
-		or #SelectedRecording.Movement == 0 then
+	if not RecordingToPlay.Movement
+		or #RecordingToPlay.Movement == 0 then
 
 		return
 	end
@@ -2030,7 +2085,6 @@ local function StartReplay()
 	ReplayStartPositioning = true
 
 	task.spawn(function()
-		local RecordingToPlay = SelectedRecording
 		local Ready = WaitForReplayStartPosition(RecordingToPlay)
 
 		ReplayStartPositioning = false
@@ -4947,6 +5001,23 @@ task.spawn(function()
 
 		local State = GetDungeonState()
 
+		-- Track continuous high ping. If it remains high long enough,
+		-- do not keep waiting for Auto Start; requeue the dungeon through
+		-- replayDungeon so the game can move to another server.
+		local CurrentPingHigh = IsPingHigh()
+		if CurrentPingHigh then
+			if not HighPingSince then
+				HighPingSince = os.clock()
+				HighPingServerReplayFired = false
+				print("[Replay] High ping detected; waiting " .. HIGH_PING_SERVER_REPLAY_DELAY .. "s before recovery")
+			end
+		else
+			if HighPingSince then
+				HighPingSince = nil
+				HighPingServerReplayFired = false
+			end
+		end
+
 		local Name = State.dungeonName
 		if Name == nil or tostring(Name) == "" then
 			Name = "Unknown"
@@ -4966,11 +5037,22 @@ task.spawn(function()
 			AutoStartPending = false
 		end
 
-		if AutoStart and State.dungeonStarted ~= true and not AutoStartPending and not IsPingHigh() then
+		if CurrentPingHigh
+			and HighPingSince
+			and not HighPingServerReplayFired
+			and os.clock() - HighPingSince >= HIGH_PING_SERVER_REPLAY_DELAY then
+			FireHighPingDungeonReplay(State)
+		end
+
+		if AutoStart
+			and State.dungeonStarted ~= true
+			and not AutoStartPending
+			and not CurrentPingHigh
+			and not HighPingServerReplayFired then
 			FireAutoStart()
 		end
 
-		if AutoReplay and not IsPingHigh() then
+		if AutoReplay and not CurrentPingHigh then
 			FireAutoReplay(State)
 		end
 
@@ -4999,10 +5081,9 @@ task.spawn(function()
 						UpdateAutoReplayCurrentButton()
 					end
 
-					if RecordingToPlay and RecordingToPlay.Movement and #SelectedRecording.Movement > 0 then
-						SelectedRecording = RecordingToPlay
+					if RecordingToPlay and RecordingToPlay.Movement and #RecordingToPlay.Movement > 0 then
 						print("[Replay] Auto Replay Recording ->", tostring(RecordingToPlay.Name))
-						StartReplay()
+						StartReplay(RecordingToPlay)
 						AutoReplayRecordingAt = nil
 					else
 						warn("[Replay] Auto Replay Recording: no saved recording available")
