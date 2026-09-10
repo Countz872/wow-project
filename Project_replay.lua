@@ -35,10 +35,26 @@ end
 
 GetBackpack()
 
-local Remotes = ReplicatedStorage:WaitForChild("remotes")
-local AbilityUsed = Remotes:WaitForChild("abilityUsed")
-local ChangeStartValue = Remotes:WaitForChild("changeStartValue")
-local ReplayDungeon = Remotes:WaitForChild("replayDungeon")
+local Remotes = ReplicatedStorage:FindFirstChild("remotes")
+local AbilityUsed = Remotes and Remotes:FindFirstChild("abilityUsed") or nil
+local ChangeStartValue = Remotes and Remotes:FindFirstChild("changeStartValue") or nil
+local ReplayDungeon = Remotes and Remotes:FindFirstChild("replayDungeon") or nil
+
+-- Do not block UI creation if a remote is temporarily unavailable.
+task.spawn(function()
+	while not Remotes do
+		Remotes = ReplicatedStorage:FindFirstChild("remotes")
+		if Remotes then break end
+		task.wait(0.5)
+	end
+	while Remotes and (not AbilityUsed or not ChangeStartValue or not ReplayDungeon) do
+		AbilityUsed = AbilityUsed or Remotes:FindFirstChild("abilityUsed")
+		ChangeStartValue = ChangeStartValue or Remotes:FindFirstChild("changeStartValue")
+		ReplayDungeon = ReplayDungeon or Remotes:FindFirstChild("replayDungeon")
+		if AbilityUsed and ChangeStartValue and ReplayDungeon then break end
+		task.wait(0.5)
+	end
+end)
 
 --------------------------------------------------
 -- DUNGEON AUTO SYSTEM
@@ -219,6 +235,9 @@ local function FireAutoStart()
 	end
 
 	local Success, ErrorMessage = pcall(function()
+		if not ChangeStartValue then
+			error("changeStartValue remote is unavailable")
+		end
 		ChangeStartValue:FireServer()
 	end)
 
@@ -298,6 +317,9 @@ local function FireAutoReplay(State)
 	print("[Replay] fightingBoss:", FightingBoss)
 
 	local Success, ErrorMessage = pcall(function()
+		if not ReplayDungeon then
+			error("replayDungeon remote is unavailable")
+		end
 		ReplayDungeon:FireServer(Payload)
 	end)
 
@@ -344,6 +366,9 @@ local function FireHighPingDungeonReplay(State)
 	}
 
 	local Success, ErrorMessage = pcall(function()
+		if not ReplayDungeon then
+			error("replayDungeon remote is unavailable")
+		end
 		ReplayDungeon:FireServer(Payload)
 	end)
 
@@ -362,7 +387,7 @@ end
 -- CONFIG
 --------------------------------------------------
 
-local VERSION = "v3.6.5"
+local VERSION = "v3.6.6"
 
 local RECORD_INTERVAL = 0.05
 
@@ -864,6 +889,9 @@ local function ReplaySkill(Key, SkillName)
 
 	local Success, ErrorMessage = pcall(function()
 
+		if not AbilityUsed then
+			error("abilityUsed remote is unavailable")
+		end
 		AbilityUsed:FireServer(Key, Skill)
 
 		local Event =
@@ -2544,8 +2572,8 @@ MainFrame.Size =
 
 MainFrame.Position =
 	UDim2.new(
-		0.5,
-		-167,
+		0,
+		18,
 		0.5,
 		-260
 	)
