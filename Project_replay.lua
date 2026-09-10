@@ -1,4 +1,4 @@
---// Replay System v3.6.5 fixed 1
+--// Replay System v3.6.5 fix spawn
 --// Cloudflare D1 recording sync integration
 --// Compact Mobile UI
 --// Multiple Recordings + Mouse/Touch Dragging
@@ -845,7 +845,64 @@ local ReplayRespawnIndex = nil
 local ReplayState = {
 	RespawnTime = nil,
 	ActiveRecording = nil,
+
+	-- While a character is dead, Roblox keeps it around (ragdolled) for a
+	-- moment before the respawn actually happens. RecordMovement() has no
+	-- way to know a death occurred, so it keeps sampling the corpse's
+	-- frozen position during that window -- the recording ends up with a
+	-- short run of movement points sitting at the death location before
+	-- it jumps to the real post-respawn position. This tolerance is used
+	-- to skip forward past that frozen cluster to the first point that
+	-- matches where the replaying character actually is after respawning.
+	PositionMatchDistance = 8,
 }
+
+-- Combines a time-based lookup (reliable, keeps the correct ordering
+-- through multiple deaths) with a scoped, forward-only position check
+-- (skips past any movement points frozen at the death location while the
+-- character was waiting to respawn). Never searches backward, so it can
+-- never rewind into an earlier point in the recording.
+function ReplayState.FindResumeIndex(Recording, RespawnTime, CurrentPosition)
+
+	if not Recording
+		or not Recording.Movement
+		or #Recording.Movement == 0 then
+
+		return 1
+	end
+
+	local Movement = Recording.Movement
+
+	local TimeIndex = nil
+
+	if RespawnTime then
+		for MovementIndex, Point in ipairs(Movement) do
+			if (Point.Time or 0) >= RespawnTime then
+				TimeIndex = MovementIndex
+				break
+			end
+		end
+	end
+
+	TimeIndex = TimeIndex or 1
+
+	if CurrentPosition then
+		for MovementIndex = TimeIndex, #Movement do
+			local Point = Movement[MovementIndex]
+
+			if Point.Position
+				and (Point.Position - CurrentPosition).Magnitude
+					<= ReplayState.PositionMatchDistance then
+
+				return MovementIndex
+			end
+		end
+	end
+
+	return TimeIndex
+
+end
+
 local RecordingRespawnPending = false
 
 local SkillActionIndex = 1
@@ -1127,6 +1184,18 @@ local function RecordMovement()
 	end
 
 	if not RootPart then
+		return
+	end
+
+	-- Don't log movement while dead/ragdolled and waiting to respawn.
+	-- Otherwise this keeps sampling the corpse's frozen position for the
+	-- whole respawn delay, baking a "detour to the death spot" into the
+	-- recording that replay would otherwise have to path through later.
+	if not RootPart.Parent then
+		return
+	end
+
+	if not Humanoid or Humanoid.Health <= 0 then
 		return
 	end
 
@@ -1911,12 +1980,11 @@ local function ReplayMovement(
 			local ActionResetAnchorTime = ReplayState.RespawnTime
 
 			if not ResumeIndex and ReplayState.RespawnTime then
-				for MovementIndex, Point in ipairs(Movement) do
-					if (Point.Time or 0) >= ReplayState.RespawnTime then
-						ResumeIndex = MovementIndex
-						break
-					end
-				end
+				ResumeIndex = ReplayState.FindResumeIndex(
+					Recording,
+					ReplayState.RespawnTime,
+					RootPart.Position
+				)
 			end
 
 			if not ResumeIndex then
@@ -2342,12 +2410,11 @@ Player.CharacterAdded:Connect(
 		local ResumeIndex = nil
 
 		if ReplayState.RespawnTime then
-			for MovementIndex, Point in ipairs(ReplayRecording.Movement or {}) do
-				if (Point.Time or 0) >= ReplayState.RespawnTime then
-					ResumeIndex = MovementIndex
-					break
-				end
-			end
+			ResumeIndex = ReplayState.FindResumeIndex(
+				ReplayRecording,
+				ReplayState.RespawnTime,
+				RootPart.Position
+			)
 		end
 
 		if not ResumeIndex then
