@@ -1,4 +1,4 @@
---// Replay System v3.6.5 fix ping
+--// Replay System v3.6.5 afk fixed
 --// Cloudflare D1 recording sync integration
 --// Compact Mobile UI
 --// Multiple Recordings + Mouse/Touch Dragging
@@ -84,7 +84,7 @@ local DUNGEON_SCAN_INTERVAL = 0.35
 -- and the replay keeps running normally.
 local HIGH_PING_THRESHOLD = 1.0
 local NORMAL_PING_THRESHOLD = 0.18
-local HIGH_PING_SERVER_REPLAY_DELAY = 5
+local HIGH_PING_SERVER_REPLAY_DELAY = 0
 
 local HighPingSince = nil
 local HighPingServerReplayFired = false
@@ -1926,6 +1926,21 @@ local function ReplayMovement(
 		Action._Replayed = nil
 	end
 
+	-- Hard cap so a stuck replay (e.g. the character can never physically
+	-- reach the last recorded position) cannot block the auto replay
+	-- scheduler forever. Uses the recording's own duration plus a generous
+	-- buffer for pathfinding detours and respawn waits.
+	local RecordingDuration =
+		Recording.Duration
+		or (Movement[#Movement] and Movement[#Movement].Time)
+		or 0
+
+	local ReplayRealStart =
+		os.clock()
+
+	local ReplayMaxDuration =
+		RecordingDuration + 120
+
 	local StartIndex =
 		ReplayMovementIndex or 1
 
@@ -1962,6 +1977,19 @@ local function ReplayMovement(
 		StartTime
 
 	while IsReplaying do
+
+		-- Absolute safety valve: if a replay has been running far longer
+		-- than the recording itself, something is stuck (unreachable
+		-- target, pathfinding loop, blocked character, etc.). Break out
+		-- so the auto replay scheduler is not blocked forever.
+		if os.clock() - ReplayRealStart > ReplayMaxDuration then
+			warn(string.format(
+				"[Replay] Timeout: replay ran %.0fs (max %.0fs) - force stopping",
+				os.clock() - ReplayRealStart,
+				ReplayMaxDuration
+			))
+			break
+		end
 
 		-- NOTE: ping is intentionally NOT checked here anymore. The replay
 		-- keeps running through moderate latency (300-999 ms) without pausing.
@@ -5404,7 +5432,11 @@ task.spawn(function()
 					AutoReplayRecordingDungeonKey = DungeonKey
 					AutoReplayRecordingAt = os.clock() + AUTO_REPLAY_RECORDING_DELAY
 					AutoReplayRecordingRetryCount = 0
-					print("[Replay] Dungeon started -> Auto Replay Recording scheduled in " .. AUTO_REPLAY_RECORDING_DELAY .. " seconds")
+					print(string.format(
+						"[Replay] Dungeon started -> Auto Replay Recording scheduled in %.1fs (key=%s)",
+						AUTO_REPLAY_RECORDING_DELAY,
+						DungeonKey
+					))
 				end
 			end
 		else
@@ -5441,16 +5473,26 @@ task.spawn(function()
 		if AutoReplayRecording and AutoReplayRecordingAt then
 			local Now = os.clock()
 			if Now >= AutoReplayRecordingAt then
-				-- Never consume the pending auto replay just because the character is
-				-- temporarily busy. Keep retrying until the replay can actually start.
-				if not DungeonStartedNow then
-					-- Auto Start can fire before the dungeon actually enters its
-					-- started state. Never consume the recording replay early.
+				-- Only two conditions actually block us:
+				--   * another replay is already running
+				--   * we're currently recording
+				-- WaitForReplayStartPosition() handles walking the character
+				-- to the recording's first point, so we do NOT need to wait
+				-- for dungeonStarted to be true. That gate was the main
+				-- cause of multi-minute stalls when the game was slow to
+				-- reflect changeStartValue.
+				if IsReplaying or IsRecording or ReplayStartPositioning then
 					AutoReplayRecordingRetryCount += 1
 					AutoReplayRecordingAt = Now + 0.5
-				elseif IsReplaying or IsRecording or ReplayStartPositioning then
-					AutoReplayRecordingRetryCount += 1
-					AutoReplayRecordingAt = Now + 0.5
+
+					-- Log every 10 seconds so stalls are visible in the
+					-- output and don't silently drag on.
+					if AutoReplayRecordingRetryCount % 20 == 0 then
+						print(string.format(
+							"[Replay] Auto Replay waiting (%.0fs): another replay in progress",
+							AutoReplayRecordingRetryCount * 0.5
+						))
+					end
 				else
 					local RecordingToPlay = nil
 					if AutoReplayRecordingName then
@@ -5469,7 +5511,11 @@ task.spawn(function()
 					end
 
 					if RecordingToPlay and RecordingToPlay.Movement and #RecordingToPlay.Movement > 0 then
-						print("[Replay] Auto Replay Recording ->", tostring(RecordingToPlay.Name))
+						print(string.format(
+							"[Replay] Auto Replay Recording FIRING -> %s (waited %.1fs extra)",
+							tostring(RecordingToPlay.Name),
+							AutoReplayRecordingRetryCount * 0.5
+						))
 						StartReplay(RecordingToPlay)
 						-- StartReplay may take a moment to position the character. The
 						-- ReplayStartPositioning guard above prevents duplicate starts.
