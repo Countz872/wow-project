@@ -1,4 +1,4 @@
---// Replay System v3.2.1
+--// Replay System v3.3.0
 --// Cloudflare D1 recording sync integration
 --// Compact Mobile UI
 --// Multiple Recordings + Mouse/Touch Dragging
@@ -383,6 +383,8 @@ local function SerializeRecording(Recording)
 		Duration = Recording.Duration or 0,
 		Movement = {},
 		Actions = {},
+		QSkillName = Recording.QSkillName,
+		ESkillName = Recording.ESkillName,
 	}
 
 	for _, Point in ipairs(Recording.Movement or {}) do
@@ -417,6 +419,8 @@ local function DeserializeRecording(Recording)
 		Duration = tonumber(Recording.Duration) or 0,
 		Movement = {},
 		Actions = {},
+		QSkillName = Recording.QSkillName and tostring(Recording.QSkillName) or nil,
+		ESkillName = Recording.ESkillName and tostring(Recording.ESkillName) or nil,
 	}
 
 	for _, Point in ipairs(Recording.Movement or {}) do
@@ -876,6 +880,9 @@ local function StartRecording(Name)
 		Movement = {},
 
 		Actions = {},
+
+		QSkillName = QSkillName,
+		ESkillName = ESkillName,
 
 		StartTime = os.clock(),
 
@@ -1562,9 +1569,17 @@ local function ReplayActionsBetween(
 			if Action.ActionType ==
 				"Skill" then
 
+				local SavedSkillName = Action.SkillName
+
+				if Action.Key == "q" and Recording.QSkillName then
+					SavedSkillName = Recording.QSkillName
+				elseif Action.Key == "e" and Recording.ESkillName then
+					SavedSkillName = Recording.ESkillName
+				end
+
 				ReplaySkill(
 					Action.Key,
-					Action.SkillName
+					SavedSkillName
 				)
 
 			elseif Action.ActionType == "Respawn" then
