@@ -1840,6 +1840,17 @@ local function ReplayMovement(
 	local RealStart =
 		os.clock()
 
+	-- Tracks the replay clock as of the last frame the character was alive.
+	-- Real (unscripted) deaths -- e.g. the bot actually dying in combat --
+	-- never set ReplayState.RespawnTime via a recorded "Respawn" action, so
+	-- without this, resume falls back to FindNearestMovementIndex, which is
+	-- unreliable: Roblox always respawns at a fixed spawn point, not at the
+	-- death location, so proximity search tends to snap back to whichever
+	-- recorded point is nearest that spawn pad (often near the very start
+	-- of the recording) instead of continuing where playback left off.
+	local LastKnownReplayTime =
+		StartTime
+
 	while IsReplaying do
 
 		-- High ping can make server movement/ability replication arrive late.
@@ -1865,6 +1876,15 @@ local function ReplayMovement(
 			or not RootPart
 			or not RootPart.Parent
 			or Humanoid.Health <= 0 then
+
+			-- Record where we were in the recording at the moment of death,
+			-- even if this death was not a scripted Respawn action (e.g. the
+			-- bot actually died in combat). This guarantees CharacterAdded
+			-- always has a reliable time-based resume point and never has to
+			-- fall back to physical-proximity matching.
+			if not ReplayState.RespawnTime then
+				ReplayState.RespawnTime = LastKnownReplayTime
+			end
 
 			-- IMPORTANT: do not let replay time continue while dead.
 			-- Otherwise all Q/E actions can be consumed before respawn.
@@ -1907,6 +1927,7 @@ local function ReplayMovement(
 			StartTime = Movement[ResumeIndex].Time or 0
 			ReplayTime = StartTime
 			PreviousTime = StartTime
+			LastKnownReplayTime = StartTime
 			RealStart = os.clock()
 
 			ClearPath()
@@ -2015,6 +2036,11 @@ local function ReplayMovement(
 		)
 
 		PreviousTime =
+			ReplayTime
+
+		-- Character is alive and this frame completed normally, so this is
+		-- a good known-safe point to resume from if death happens later.
+		LastKnownReplayTime =
 			ReplayTime
 
 		local FinalPoint =
