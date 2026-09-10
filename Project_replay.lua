@@ -56,6 +56,7 @@ local LastAutoReplayKey = nil
 local AutoStartPending = false
 local AutoReplayRecordingAt = nil
 local AutoReplayRecordingRetryCount = 0
+local AutoReplayRecordingDungeonKey = nil
 local AUTO_START_COOLDOWN = 3
 local AUTO_REPLAY_RECORDING_DELAY = 6
 local DUNGEON_SCAN_INTERVAL = 0.35
@@ -359,7 +360,7 @@ end
 -- CONFIG
 --------------------------------------------------
 
-local VERSION = "v3.6.2"
+local VERSION = "v3.6.3"
 
 local RECORD_INTERVAL = 0.05
 
@@ -5093,11 +5094,21 @@ task.spawn(function()
 			tostring(State.dungeonStarted == true)
 		)
 
-		-- A successful Auto Start is one-shot for this dungeon-start cycle.
-		-- This prevents the 0.35s scanner from repeatedly scheduling the
-		-- saved-recording replay while dungeonStarted is still updating.
+		-- Once the dungeon is ACTUALLY started, Auto Replay Recording must be
+		-- scheduled even if Auto Start was missed, delayed, or its pending flag
+		-- was cleared by another part of the automation.
 		if State.dungeonStarted == true then
 			AutoStartPending = false
+
+			if AutoReplayRecording and not IsReplaying and not IsRecording then
+				local DungeonKey = tostring(State.dungeonName or "Unknown")
+				if AutoReplayRecordingDungeonKey ~= DungeonKey and not AutoReplayRecordingAt then
+					AutoReplayRecordingDungeonKey = DungeonKey
+					AutoReplayRecordingAt = os.clock() + AUTO_REPLAY_RECORDING_DELAY
+					AutoReplayRecordingRetryCount = 0
+					print("[Replay] Dungeon started -> Auto Replay Recording scheduled in " .. AUTO_REPLAY_RECORDING_DELAY .. " seconds")
+				end
+			end
 		end
 
 		if CurrentPingHigh
