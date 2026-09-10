@@ -1,4 +1,4 @@
---// Replay System v3.3.0
+--// Replay System v3.4.0
 --// Cloudflare D1 recording sync integration
 --// Compact Mobile UI
 --// Multiple Recordings + Mouse/Touch Dragging
@@ -718,6 +718,7 @@ local LastPathCalculation = 0
 local NeedNewPath = false
 
 local ReplayMovementIndex = 1
+local ReplayStartPositioning = false
 
 local LastRecordTime = 0
 
@@ -1855,6 +1856,102 @@ local function ReplayMovement(
 end
 
 --------------------------------------------------
+-- WAIT FOR REPLAY START POSITION
+--------------------------------------------------
+
+local function WaitForReplayStartPosition(Recording)
+	if not Recording
+		or not Recording.Movement
+		or #Recording.Movement == 0 then
+		return false
+	end
+
+	local FirstPoint = Recording.Movement[1]
+	if not FirstPoint or not FirstPoint.Position then
+		return false
+	end
+
+	local TargetPosition = FirstPoint.Position
+	local StartWait = os.clock()
+	local LastDirectMove = 0
+	local LastPathTry = 0
+	local PositioningPath = nil
+	local PositioningWaypoints = {}
+	local PositioningWaypointIndex = 1
+
+	while ReplayStartPositioning and os.clock() - StartWait < 30 do
+		if not Character
+			or not Character.Parent
+			or not Humanoid
+			or not Humanoid.Parent
+			or not RootPart
+			or not RootPart.Parent
+			or Humanoid.Health <= 0 then
+			task.wait(0.05)
+			continue
+		end
+
+		local Distance = (RootPart.Position - TargetPosition).Magnitude
+		if Distance <= TARGET_REACHED_DISTANCE then
+			return true
+		end
+
+		if PositioningPath and PositioningWaypointIndex <= #PositioningWaypoints then
+			local Waypoint = PositioningWaypoints[PositioningWaypointIndex]
+
+			if (RootPart.Position - Waypoint.Position).Magnitude <= TARGET_REACHED_DISTANCE then
+				PositioningWaypointIndex += 1
+				Waypoint = PositioningWaypoints[PositioningWaypointIndex]
+			end
+
+			if Waypoint then
+				if Waypoint.Action == Enum.PathWaypointAction.Jump then
+					Humanoid.Jump = true
+				end
+				Humanoid:MoveTo(Waypoint.Position)
+			end
+		else
+			PositioningPath = nil
+			PositioningWaypoints = {}
+			PositioningWaypointIndex = 1
+
+			if os.clock() - LastPathTry >= PATH_RECALCULATE_DELAY then
+				LastPathTry = os.clock()
+
+				local Path = PathfindingService:CreatePath({
+					AgentRadius = AGENT_RADIUS,
+					AgentHeight = AGENT_HEIGHT,
+					AgentCanJump = true,
+					WaypointSpacing = WAYPOINT_SPACING
+				})
+
+				local Success = pcall(function()
+					Path:ComputeAsync(RootPart.Position, TargetPosition)
+				end)
+
+				if Success and Path.Status == Enum.PathStatus.Success then
+					local Waypoints = Path:GetWaypoints()
+					if #Waypoints >= 2 then
+						PositioningPath = Path
+						PositioningWaypoints = Waypoints
+						PositioningWaypointIndex = 2
+					end
+				end
+			end
+
+			if not PositioningPath and os.clock() - LastDirectMove >= MOVETO_REFRESH then
+				Humanoid:MoveTo(TargetPosition)
+				LastDirectMove = os.clock()
+			end
+		end
+
+		task.wait()
+	end
+
+	return false
+end
+
+--------------------------------------------------
 -- START REPLAY
 --------------------------------------------------
 
@@ -1881,18 +1978,33 @@ local function StartReplay()
 		return
 	end
 
+	if ReplayStartPositioning then
+		return
+	end
+
 	ReplayMovementIndex =
 		1
 
-	task.spawn(
-		function()
+	ReplayStartPositioning = true
 
-			ReplayMovement(
-				SelectedRecording
-			)
+	task.spawn(function()
+		local RecordingToPlay = SelectedRecording
+		local Ready = WaitForReplayStartPosition(RecordingToPlay)
 
+		ReplayStartPositioning = false
+
+		if not Ready then
+			warn("[Replay] Could not reach the recording's first position")
+			return
 		end
-	)
+
+		if IsRecording or IsReplaying then
+			return
+		end
+
+		ReplayMovementIndex = 1
+		ReplayMovement(RecordingToPlay)
+	end)
 
 end
 
