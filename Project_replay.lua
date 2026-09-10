@@ -1,4 +1,4 @@
---// Replay System v3.6.5 fix spawn stall
+--// Replay System v3.6.5 fix ping
 --// Cloudflare D1 recording sync integration
 --// Compact Mobile UI
 --// Multiple Recordings + Mouse/Touch Dragging
@@ -79,9 +79,12 @@ local AUTO_START_COOLDOWN = 3
 local AUTO_REPLAY_RECORDING_DELAY = 6
 local DUNGEON_SCAN_INTERVAL = 0.35
 
-local HIGH_PING_THRESHOLD = 0.30
+-- Emergency requeue threshold: only a full second of latency triggers the
+-- server-side replayDungeon recovery. Anything below 1000 ms is tolerated
+-- and the replay keeps running normally.
+local HIGH_PING_THRESHOLD = 1.0
 local NORMAL_PING_THRESHOLD = 0.18
-local HIGH_PING_SERVER_REPLAY_DELAY = 15
+local HIGH_PING_SERVER_REPLAY_DELAY = 5
 
 local HighPingSince = nil
 local HighPingServerReplayFired = false
@@ -332,8 +335,8 @@ local function FireAutoReplay(State)
 end
 
 local function FireHighPingDungeonReplay(State)
-	-- If ping stays bad for a long time before Auto Start can happen,
-	-- use replayDungeon as a recovery/requeue attempt instead of waiting forever.
+	-- Ping has hit the emergency threshold (default 1000 ms). Requeue the
+	-- dungeon immediately so the game migrates us to a healthier server.
 	local DungeonName = State.dungeonName
 	if DungeonName == nil or tostring(DungeonName) == "" then
 		warn("[Replay] High ping recovery: dungeonName is unavailable.")
@@ -377,7 +380,8 @@ local function FireHighPingDungeonReplay(State)
 		AutoStartPending = false
 		AutoReplayRecordingAt = nil
 		LastAutoReplayKey = nil
-		print("[Replay] High ping persisted for " .. HIGH_PING_SERVER_REPLAY_DELAY .. "s -> replayDungeon:", DungeonName)
+		print(string.format("[Replay] Ping %.0f ms >= %.0f ms -> immediate replayDungeon: %s",
+			GetCurrentPing() * 1000, HIGH_PING_THRESHOLD * 1000, DungeonName))
 	else
 		warn("[Replay] High ping recovery error:", ErrorMessage)
 	end
@@ -1887,13 +1891,6 @@ end
 -- REPLAY MOVEMENT
 --------------------------------------------------
 
-local function WaitForNormalPing()
-	while IsReplaying and IsPingHigh() do
-		task.wait(0.1)
-	end
-	return IsReplaying
-end
-
 local function ReplayMovement(
 	Recording
 )
@@ -1966,21 +1963,11 @@ local function ReplayMovement(
 
 	while IsReplaying do
 
-		-- High ping can make server movement/ability replication arrive late.
-		-- Freeze the replay clock while latency is high so recorded actions are
-		-- not consumed early. The replay resumes when ping returns to normal.
-		if IsPingHigh() then
-			local PingWaitStart = os.clock()
-			print(string.format("[Replay] High ping (%.0f ms) - pausing replay", GetCurrentPing() * 1000))
-			while IsReplaying and GetCurrentPing() >= NORMAL_PING_THRESHOLD do
-				task.wait(0.1)
-			end
-			if not IsReplaying then
-				break
-			end
-			RealStart += os.clock() - PingWaitStart
-			print(string.format("[Replay] Ping normal (%.0f ms) - resuming replay", GetCurrentPing() * 1000))
-		end
+		-- NOTE: ping is intentionally NOT checked here anymore. The replay
+		-- keeps running through moderate latency (300-999 ms) without pausing.
+		-- Only a full-second spike triggers the emergency replayDungeon call
+		-- in the dungeon scanner, which migrates the player to a new server
+		-- and terminates this replay naturally.
 
 		if not Character
 			or not Character.Parent
@@ -5366,15 +5353,16 @@ task.spawn(function()
 
 		local State = GetDungeonState()
 
-		-- Track continuous high ping. If it remains high long enough,
-		-- do not keep waiting for Auto Start; requeue the dungeon through
-		-- replayDungeon so the game can move to another server.
+		-- Track continuous high ping. Only a full second (HIGH_PING_THRESHOLD)
+		-- triggers the emergency requeue. Anything below that is tolerated and
+		-- the replay keeps running normally.
 		local CurrentPingHigh = IsPingHigh()
 		if CurrentPingHigh then
 			if not HighPingSince then
 				HighPingSince = os.clock()
 				HighPingServerReplayFired = false
-				print("[Replay] High ping detected; waiting " .. HIGH_PING_SERVER_REPLAY_DELAY .. "s before recovery")
+				print(string.format("[Replay] Ping >= %.0f ms detected; immediate recovery",
+					HIGH_PING_THRESHOLD * 1000))
 			end
 		else
 			if HighPingSince then
@@ -5425,6 +5413,9 @@ task.spawn(function()
 			AutoReplayRecordingDungeonKey = nil
 		end
 
+		-- Emergency recovery fires immediately on the first scan tick where
+		-- ping crosses the 1-second threshold. HIGH_PING_SERVER_REPLAY_DELAY
+		-- is 0, so no extra waiting is required.
 		if CurrentPingHigh
 			and HighPingSince
 			and not HighPingServerReplayFired
@@ -5432,6 +5423,7 @@ task.spawn(function()
 			FireHighPingDungeonReplay(State)
 		end
 
+		-- Normal automation only runs when not in the emergency state.
 		if AutoStart
 			and State.dungeonStarted ~= true
 			and not AutoStartPending
@@ -5450,15 +5442,10 @@ task.spawn(function()
 			local Now = os.clock()
 			if Now >= AutoReplayRecordingAt then
 				-- Never consume the pending auto replay just because the character is
-				-- temporarily busy or ping is high. Keep retrying until the replay can
-				-- actually be started.
+				-- temporarily busy. Keep retrying until the replay can actually start.
 				if not DungeonStartedNow then
 					-- Auto Start can fire before the dungeon actually enters its
 					-- started state. Never consume the recording replay early.
-					-- Keep the timer alive until the dungeon is confirmed started.
-					AutoReplayRecordingRetryCount += 1
-					AutoReplayRecordingAt = Now + 0.5
-				elseif IsPingHigh() then
 					AutoReplayRecordingRetryCount += 1
 					AutoReplayRecordingAt = Now + 0.5
 				elseif IsReplaying or IsRecording or ReplayStartPositioning then
