@@ -57,6 +57,8 @@ local AutoStartPending = false
 local AutoReplayRecordingAt = nil
 local AutoReplayRecordingRetryCount = 0
 local AutoReplayRecordingDungeonKey = nil
+local LastDungeonStartedState = nil
+local DungeonStartCycle = 0
 local AUTO_START_COOLDOWN = 3
 local AUTO_REPLAY_RECORDING_DELAY = 6
 local DUNGEON_SCAN_INTERVAL = 0.35
@@ -4502,6 +4504,8 @@ AutoReplayRecordingButton.MouseButton1Click:Connect(function()
 	AutoReplayRecording = not AutoReplayRecording
 	if not AutoReplayRecording then
 		AutoReplayRecordingAt = nil
+		AutoReplayRecordingRetryCount = 0
+		AutoReplayRecordingDungeonKey = nil
 	end
 	UpdateDungeonButtons()
 	-- Persist this setting independently of the Cloud Auto Save toggle.
@@ -5094,14 +5098,23 @@ task.spawn(function()
 			tostring(State.dungeonStarted == true)
 		)
 
-		-- Once the dungeon is ACTUALLY started, Auto Replay Recording must be
-		-- scheduled even if Auto Start was missed, delayed, or its pending flag
-		-- was cleared by another part of the automation.
-		if State.dungeonStarted == true then
+		-- Detect every dungeon start as a new cycle. The dungeon name alone is
+		-- not enough because the same dungeon can be started repeatedly.
+		local DungeonStartedNow = State.dungeonStarted == true
+		if DungeonStartedNow and LastDungeonStartedState ~= true then
+			DungeonStartCycle += 1
+			AutoReplayRecordingDungeonKey = nil
+			print("[Replay] New dungeon start cycle:", DungeonStartCycle)
+		end
+		LastDungeonStartedState = DungeonStartedNow
+
+		if DungeonStartedNow then
 			AutoStartPending = false
 
-			if AutoReplayRecording and not IsReplaying and not IsRecording then
-				local DungeonKey = tostring(State.dungeonName or "Unknown")
+			-- Schedule even if another replay is currently running. The execution
+			-- section below will wait until the character is free.
+			if AutoReplayRecording then
+				local DungeonKey = tostring(State.dungeonName or "Unknown") .. "#" .. tostring(DungeonStartCycle)
 				if AutoReplayRecordingDungeonKey ~= DungeonKey and not AutoReplayRecordingAt then
 					AutoReplayRecordingDungeonKey = DungeonKey
 					AutoReplayRecordingAt = os.clock() + AUTO_REPLAY_RECORDING_DELAY
@@ -5109,6 +5122,10 @@ task.spawn(function()
 					print("[Replay] Dungeon started -> Auto Replay Recording scheduled in " .. AUTO_REPLAY_RECORDING_DELAY .. " seconds")
 				end
 			end
+		else
+			-- Clear the cycle lock when the dungeon ends so the next start can
+			-- always schedule again, even for the same dungeon name.
+			AutoReplayRecordingDungeonKey = nil
 		end
 
 		if CurrentPingHigh
@@ -5138,7 +5155,13 @@ task.spawn(function()
 				-- Never consume the pending auto replay just because the character is
 				-- temporarily busy or ping is high. Keep retrying until the replay can
 				-- actually be started.
-				if IsPingHigh() then
+				if not DungeonStartedNow then
+					-- Auto Start can fire before the dungeon actually enters its
+					-- started state. Never consume the recording replay early.
+					-- Keep the timer alive until the dungeon is confirmed started.
+					AutoReplayRecordingRetryCount += 1
+					AutoReplayRecordingAt = Now + 0.5
+				elseif IsPingHigh() then
 					AutoReplayRecordingRetryCount += 1
 					AutoReplayRecordingAt = Now + 0.5
 				elseif IsReplaying or IsRecording or ReplayStartPositioning then
