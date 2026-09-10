@@ -1,4 +1,4 @@
---// Replay System v3.6.5 fix spawn
+--// Replay System v3.6.5 fix spawn stall
 --// Cloudflare D1 recording sync integration
 --// Compact Mobile UI
 --// Multiple Recordings + Mouse/Touch Dragging
@@ -855,6 +855,15 @@ local ReplayState = {
 	-- to skip forward past that frozen cluster to the first point that
 	-- matches where the replaying character actually is after respawning.
 	PositionMatchDistance = 8,
+
+	-- Tracks where the character respawned last time. If the character
+	-- respawns at the SAME position again, the previous room was never
+	-- cleared (clearing a room is what advances the spawn forward). In
+	-- that case the replay backtracks to just after the previous Respawn
+	-- action so this room's movement + Q/E actions get replayed again
+	-- until the room actually clears.
+	RespawnPositionTolerance = 8,
+	LastRespawnPosition = nil,
 }
 
 -- Combines a time-based lookup (reliable, keeps the correct ordering
@@ -900,6 +909,41 @@ function ReplayState.FindResumeIndex(Recording, RespawnTime, CurrentPosition)
 	end
 
 	return TimeIndex
+
+end
+
+-- Returns the time of the most recent Respawn action strictly BEFORE
+-- BeforeTime, or nil if there is no earlier Respawn action. Used to
+-- backtrack the replay when a room failed to clear (same respawn
+-- position detected twice in a row).
+function ReplayState.FindPreviousRespawnTime(Recording, BeforeTime)
+
+	if not Recording
+		or not Recording.Actions
+		or not BeforeTime then
+
+		return nil
+	end
+
+	local PreviousTime = nil
+
+	for _, Action in ipairs(Recording.Actions) do
+
+		if Action.ActionType == "Respawn" then
+
+			local ActionTime = Action.Time or 0
+
+			if ActionTime < BeforeTime then
+				PreviousTime = ActionTime
+			else
+				break
+			end
+
+		end
+
+	end
+
+	return PreviousTime
 
 end
 
@@ -2166,6 +2210,7 @@ local function ReplayMovement(
 	ReplayRespawnPending = false
 	ReplayRespawnIndex = nil
 	ReplayState.RespawnTime = nil
+	ReplayState.LastRespawnPosition = nil
 
 	ClearPath()
 
@@ -2318,6 +2363,7 @@ local function StartReplay(RecordingOverride)
 	ReplayRespawnPending = false
 	ReplayRespawnIndex = nil
 	ReplayState.RespawnTime = nil
+	ReplayState.LastRespawnPosition = nil
 
 	ReplayStartPositioning = true
 
@@ -2358,6 +2404,7 @@ local function StopReplay()
 	ReplayRespawnPending = false
 	ReplayRespawnIndex = nil
 	ReplayState.RespawnTime = nil
+	ReplayState.LastRespawnPosition = nil
 
 	ClearPath()
 
@@ -2407,25 +2454,65 @@ Player.CharacterAdded:Connect(
 			return
 		end
 
+		local CurrentPosition = RootPart.Position
+		local ResumeTime = ReplayState.RespawnTime
+
+		-- Same-spot respawn detection: if the character respawned at the
+		-- exact same place as the previous respawn, the room never got
+		-- cleared. Instead of advancing the replay clock forward (which
+		-- leaves the character pathing to positions in a room it never
+		-- reached), backtrack to just after the PREVIOUS respawn action
+		-- so this room's clearing movement + Q/E actions are replayed
+		-- again until the room actually clears and the spawn advances.
+		if ResumeTime
+			and ReplayState.LastRespawnPosition
+			and (CurrentPosition - ReplayState.LastRespawnPosition).Magnitude
+				<= ReplayState.RespawnPositionTolerance then
+
+			local PreviousRespawnTime =
+				ReplayState.FindPreviousRespawnTime(
+					ReplayRecording,
+					ResumeTime
+				)
+
+			if PreviousRespawnTime then
+				ResumeTime = PreviousRespawnTime
+
+				print(
+					"[Replay] Same respawn position detected - redoing room from time",
+					PreviousRespawnTime
+				)
+			end
+
+		end
+
+		ReplayState.LastRespawnPosition = CurrentPosition
+
 		local ResumeIndex = nil
 
-		if ReplayState.RespawnTime then
+		if ResumeTime then
 			ResumeIndex = ReplayState.FindResumeIndex(
 				ReplayRecording,
-				ReplayState.RespawnTime,
-				RootPart.Position
+				ResumeTime,
+				CurrentPosition
 			)
 		end
 
 		if not ResumeIndex then
 			ResumeIndex = FindNearestMovementIndex(
 				ReplayRecording,
-				RootPart.Position
+				CurrentPosition
 			)
 		end
 
 		ReplayMovementIndex = ResumeIndex
 		ReplayRespawnIndex = ResumeIndex
+
+		-- Use the (possibly backtracked) ResumeTime as the action-reset
+		-- anchor in the ReplayMovement pending block, so actions between
+		-- the previous respawn and now are marked un-replayed and get
+		-- re-fired. This is what makes the room get cleared a second time.
+		ReplayState.RespawnTime = ResumeTime
 
 		ReplayRespawnPending = true
 
