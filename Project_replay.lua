@@ -2320,7 +2320,7 @@ Player.CharacterAdded:Connect(
 
 		print(
 			"[Replay] Respawn detected. Resume point:",
-			NearestIndex
+			ResumeIndex
 		)
 
 	end
@@ -2339,13 +2339,27 @@ ScreenGui.Name =
 ScreenGui.ResetOnSpawn =
 	false
 
+-- Defensive UI settings: keep the replay panel visible even if another
+-- PlayerGui is using a high DisplayOrder or the Roblox top-bar inset changes.
+ScreenGui.Enabled = true
+ScreenGui.IgnoreGuiInset = true
+ScreenGui.DisplayOrder = 999
 ScreenGui.ZIndexBehavior =
 	Enum.ZIndexBehavior.Sibling
 
-ScreenGui.Parent =
-	Player:WaitForChild(
-		"PlayerGui"
-	)
+local PlayerGui = Player:WaitForChild("PlayerGui")
+
+-- Prevent duplicate copies of the UI from stacking when the script is
+-- re-executed without restarting the character.
+for _, ExistingGui in ipairs(PlayerGui:GetChildren()) do
+	if ExistingGui ~= ScreenGui
+		and ExistingGui:IsA("ScreenGui")
+		and ExistingGui.Name == "ReplaySystemUI" then
+		ExistingGui:Destroy()
+	end
+end
+
+ScreenGui.Parent = PlayerGui
 
 --------------------------------------------------
 -- COLORS
@@ -2580,6 +2594,9 @@ MainFrame.Position =
 
 MainFrame.BackgroundColor3 =
 	BG
+MainFrame.Visible = true
+MainFrame.Active = true
+MainFrame.ZIndex = 1
 
 MainFrame.Parent =
 	ScreenGui
@@ -3005,6 +3022,8 @@ Content.BackgroundTransparency =
 
 Content.BorderSizePixel =
 	0
+Content.Visible = true
+Content.ZIndex = 2
 
 Content.ScrollBarThickness =
 	4
@@ -5321,8 +5340,12 @@ RunService.Heartbeat:Connect(
 -- INITIALIZE
 --------------------------------------------------
 
-RefreshRecordingList()
+-- Final UI visibility safeguard.
+ScreenGui.Enabled = true
+MainFrame.Visible = true
+MainFrame.Active = true
 
+RefreshRecordingList()
 UpdateUI()
 
 print(
