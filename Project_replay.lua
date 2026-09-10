@@ -1,4 +1,4 @@
---// Replay System v3.6.1
+--// Replay System v3.6.5
 --// Cloudflare D1 recording sync integration
 --// Compact Mobile UI
 --// Multiple Recordings + Mouse/Touch Dragging
@@ -362,7 +362,7 @@ end
 -- CONFIG
 --------------------------------------------------
 
-local VERSION = "v3.6.3"
+local VERSION = "v3.6.5"
 
 local RECORD_INTERVAL = 0.05
 
@@ -815,6 +815,8 @@ local LastRecordTime = 0
 -- Respawn/replay synchronization
 local ReplayRespawnPending = false
 local ReplayRespawnIndex = nil
+local ReplayRespawnTime = nil
+local ActiveReplayRecording = nil
 local RecordingRespawnPending = false
 
 local SkillActionIndex = 1
@@ -1713,10 +1715,17 @@ local function ReplayActionsBetween(
 					and Humanoid.Parent
 					and Humanoid.Health > 0 then
 
+					-- Remember the exact recorded death time. After the new
+					-- character spawns, replay resumes AFTER this action instead
+					-- of finding a nearby point that could be before the death.
+					ReplayRespawnTime = Action.Time or 0
+
 					pcall(function()
 						Humanoid.Health = 0
 					end)
 
+					-- Mark it immediately so the same respawn action can never
+					-- be fired again after CharacterAdded.
 					Action._Replayed = true
 
 				end
@@ -1832,9 +1841,21 @@ local function ReplayMovement(
 		end
 
 		-- A new character has spawned. Resume the replay from the
-		-- nearest recorded path point and reset the replay clock.
+		-- movement point AFTER the recorded respawn time. Do not use
+		-- physical proximity here because the spawn location can be near
+		-- an earlier point in the recording, which would replay the same
+		-- Respawn action again and cause an infinite reset loop.
 		if ReplayRespawnPending then
 			local ResumeIndex = ReplayRespawnIndex
+
+			if not ResumeIndex and ReplayRespawnTime then
+				for MovementIndex, Point in ipairs(Movement) do
+					if (Point.Time or 0) >= ReplayRespawnTime then
+						ResumeIndex = MovementIndex
+						break
+					end
+				end
+			end
 
 			if not ResumeIndex then
 				ResumeIndex = FindNearestMovementIndex(
@@ -1870,6 +1891,7 @@ local function ReplayMovement(
 
 			ReplayRespawnPending = false
 			ReplayRespawnIndex = nil
+			ReplayRespawnTime = nil
 
 			print("[Replay] Respawned. Resuming from point:", ResumeIndex)
 		end
@@ -1999,6 +2021,11 @@ local function ReplayMovement(
 
 	IsReplaying =
 		false
+
+	ActiveReplayRecording = nil
+	ReplayRespawnPending = false
+	ReplayRespawnIndex = nil
+	ReplayRespawnTime = nil
 
 	ClearPath()
 
@@ -2147,6 +2174,11 @@ local function StartReplay(RecordingOverride)
 	ReplayMovementIndex =
 		1
 
+	ActiveReplayRecording = RecordingToPlay
+	ReplayRespawnPending = false
+	ReplayRespawnIndex = nil
+	ReplayRespawnTime = nil
+
 	ReplayStartPositioning = true
 
 	task.spawn(function()
@@ -2181,6 +2213,11 @@ local function StopReplay()
 
 	IsReplaying =
 		false
+
+	ActiveReplayRecording = nil
+	ReplayRespawnPending = false
+	ReplayRespawnIndex = nil
+	ReplayRespawnTime = nil
 
 	ClearPath()
 
@@ -2218,7 +2255,8 @@ Player.CharacterAdded:Connect(
 			return
 		end
 
-		if not SelectedRecording then
+		local ReplayRecording = ActiveReplayRecording
+		if not ReplayRecording then
 			return
 		end
 
@@ -2229,17 +2267,26 @@ Player.CharacterAdded:Connect(
 			return
 		end
 
-		local NearestIndex =
-			FindNearestMovementIndex(
-				SelectedRecording,
+		local ResumeIndex = nil
+
+		if ReplayRespawnTime then
+			for MovementIndex, Point in ipairs(ReplayRecording.Movement or {}) do
+				if (Point.Time or 0) >= ReplayRespawnTime then
+					ResumeIndex = MovementIndex
+					break
+				end
+			end
+		end
+
+		if not ResumeIndex then
+			ResumeIndex = FindNearestMovementIndex(
+				ReplayRecording,
 				RootPart.Position
 			)
+		end
 
-		ReplayMovementIndex =
-			NearestIndex
-
-		ReplayRespawnIndex =
-			NearestIndex
+		ReplayMovementIndex = ResumeIndex
+		ReplayRespawnIndex = ResumeIndex
 
 		ReplayRespawnPending = true
 
