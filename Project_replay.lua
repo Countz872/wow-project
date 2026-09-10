@@ -55,6 +55,7 @@ local LastAutoStartFire = 0
 local LastAutoReplayKey = nil
 local AutoStartPending = false
 local AutoReplayRecordingAt = nil
+local AutoReplayRecordingRetryCount = 0
 local AUTO_START_COOLDOWN = 3
 local AUTO_REPLAY_RECORDING_DELAY = 6
 local DUNGEON_SCAN_INTERVAL = 0.35
@@ -227,6 +228,7 @@ local function FireAutoStart()
 		-- after Auto Start successfully fires.
 		if AutoReplayRecording then
 			AutoReplayRecordingAt = Now + AUTO_REPLAY_RECORDING_DELAY
+			AutoReplayRecordingRetryCount = 0
 		end
 
 		print("[Replay] Auto Start -> changeStartValue")
@@ -357,7 +359,7 @@ end
 -- CONFIG
 --------------------------------------------------
 
-local VERSION = "v3.6.1"
+local VERSION = "v3.6.2"
 
 local RECORD_INTERVAL = 0.05
 
@@ -4470,6 +4472,7 @@ AutoStartButton.MouseButton1Click:Connect(function()
 	else
 		AutoStartPending = false
 		AutoReplayRecordingAt = nil
+		AutoReplayRecordingRetryCount = 0
 	end
 	UpdateDungeonButtons()
 	-- Settings must be cloud-persistent even when Cloud Auto Save is OFF.
@@ -5120,11 +5123,17 @@ task.spawn(function()
 		-- after Auto Start. This never calls replayDungeon.
 		if AutoReplayRecording and AutoReplayRecordingAt then
 			local Now = os.clock()
-			if Now >= AutoReplayRecordingAt and not IsPingHigh() then
-				if IsReplaying then
-					-- Something is already replaying, so don't start a second replay.
-					AutoReplayRecordingAt = nil
-				elseif not IsRecording then
+			if Now >= AutoReplayRecordingAt then
+				-- Never consume the pending auto replay just because the character is
+				-- temporarily busy or ping is high. Keep retrying until the replay can
+				-- actually be started.
+				if IsPingHigh() then
+					AutoReplayRecordingRetryCount += 1
+					AutoReplayRecordingAt = Now + 0.5
+				elseif IsReplaying or IsRecording or ReplayStartPositioning then
+					AutoReplayRecordingRetryCount += 1
+					AutoReplayRecordingAt = Now + 0.5
+				else
 					local RecordingToPlay = nil
 					if AutoReplayRecordingName then
 						for _, Recording in ipairs(Recordings) do
@@ -5144,10 +5153,14 @@ task.spawn(function()
 					if RecordingToPlay and RecordingToPlay.Movement and #RecordingToPlay.Movement > 0 then
 						print("[Replay] Auto Replay Recording ->", tostring(RecordingToPlay.Name))
 						StartReplay(RecordingToPlay)
+						-- StartReplay may take a moment to position the character. The
+						-- ReplayStartPositioning guard above prevents duplicate starts.
 						AutoReplayRecordingAt = nil
+						AutoReplayRecordingRetryCount = 0
 					else
 						warn("[Replay] Auto Replay Recording: no saved recording available")
 						AutoReplayRecordingAt = nil
+						AutoReplayRecordingRetryCount = 0
 					end
 				end
 			end
