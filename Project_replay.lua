@@ -1,4 +1,4 @@
---// Replay System v3.5.2
+--// Replay System v3.6.1
 --// Cloudflare D1 recording sync integration
 --// Compact Mobile UI
 --// Multiple Recordings + Mouse/Touch Dragging
@@ -357,7 +357,7 @@ end
 -- CONFIG
 --------------------------------------------------
 
-local VERSION = "v3.6.0"
+local VERSION = "v3.6.1"
 
 local RECORD_INTERVAL = 0.05
 
@@ -474,11 +474,13 @@ local function SerializeRecording(Recording)
 	end
 
 	for _, Action in ipairs(Recording.Actions or {}) do
+		local AP = Action.Position
 		table.insert(Out.Actions, {
 			Time = Action.Time or 0,
 			ActionType = Action.ActionType or "Skill",
 			Key = Action.Key,
 			SkillName = Action.SkillName,
+			Position = AP and {AP.X, AP.Y, AP.Z} or nil,
 		})
 	end
 
@@ -514,11 +516,22 @@ local function DeserializeRecording(Recording)
 	end
 
 	for _, Action in ipairs(Recording.Actions or {}) do
+		local ap = Action.Position
+		local actionPosition = nil
+		if type(ap) == "table" then
+			actionPosition = Vector3.new(
+				tonumber(ap[1]) or 0,
+				tonumber(ap[2]) or 0,
+				tonumber(ap[3]) or 0
+			)
+		end
+
 		table.insert(Out.Actions, {
 			Time = tonumber(Action.Time) or 0,
 			ActionType = Action.ActionType or "Skill",
 			Key = Action.Key,
 			SkillName = Action.SkillName,
+			Position = actionPosition,
 		})
 	end
 
@@ -798,6 +811,9 @@ local LastRecordTime = 0
 local ReplayRespawnPending = false
 local ReplayRespawnIndex = nil
 local RecordingRespawnPending = false
+
+local SkillActionIndex = 1
+local SKILL_POSITION_TOLERANCE = 3.5
 
 --------------------------------------------------
 -- SKILL FUNCTIONS
@@ -1134,6 +1150,8 @@ UserInputService.InputBegan:Connect(
 						os.clock()
 						- CurrentRecording.StartTime,
 
+					Position = RootPart and RootPart.Position or nil,
+
 					ActionType = "Skill",
 
 					Key = "q",
@@ -1152,6 +1170,8 @@ UserInputService.InputBegan:Connect(
 					Time =
 						os.clock()
 						- CurrentRecording.StartTime,
+
+					Position = RootPart and RootPart.Position or nil,
 
 					ActionType = "Skill",
 
@@ -1632,36 +1652,68 @@ local function ReplayActionsBetween(
 		return
 	end
 
-	for _, Action in ipairs(
+	for Index, Action in ipairs(
 		Recording.Actions
 	) do
 
-		if Action.Time > OldTime
+		if not Action._Replayed
 			and Action.Time <= NewTime then
 
 			if Action.ActionType ==
 				"Skill" then
 
-				local SavedSkillName = Action.SkillName
+				local ShouldFire = false
 
-				if Action.Key == "q" and Recording.QSkillName then
-					SavedSkillName = Recording.QSkillName
-				elseif Action.Key == "e" and Recording.ESkillName then
-					SavedSkillName = Recording.ESkillName
+				-- New recordings store the exact position where the skill
+				-- was pressed. Once replay reaches the recorded timestamp,
+				-- wait until the character actually reaches that position.
+				-- This prevents skills from firing early when movement is
+				-- temporarily behind the replay clock.
+				if Action.Position and RootPart then
+					local Distance =
+						(RootPart.Position - Action.Position).Magnitude
+
+					ShouldFire =
+						Distance <= SKILL_POSITION_TOLERANCE
+				else
+					-- Old cloud recordings do not have a position anchor,
+					-- so they continue using the original time-based replay.
+					ShouldFire = Action.Time > OldTime
+				end
+				if ShouldFire then
+
+					local SavedSkillName = Action.SkillName
+
+					if Action.Key == "q" and Recording.QSkillName then
+						SavedSkillName = Recording.QSkillName
+					elseif Action.Key == "e" and Recording.ESkillName then
+						SavedSkillName = Recording.ESkillName
+					end
+
+					if ReplaySkill(
+						Action.Key,
+						SavedSkillName
+					) then
+						Action._Replayed = true
+					end
+
 				end
 
-				ReplaySkill(
-					Action.Key,
-					SavedSkillName
-				)
+			elseif Action.ActionType == "Respawn"
+				and Action.Time > OldTime
+				and Action.Time <= NewTime
+			then
 
-			elseif Action.ActionType == "Respawn" then
-				-- Reproduce a recorded intentional respawn. The game
-				-- handles the actual CharacterAdded/respawn sequence.
-				if Humanoid and Humanoid.Parent and Humanoid.Health > 0 then
+				if Humanoid
+					and Humanoid.Parent
+					and Humanoid.Health > 0 then
+
 					pcall(function()
 						Humanoid.Health = 0
 					end)
+
+					Action._Replayed = true
+
 				end
 
 			end
@@ -1713,6 +1765,10 @@ local function ReplayMovement(
 
 	local Movement =
 		Recording.Movement
+
+	for _, Action in ipairs(Recording.Actions or {}) do
+		Action._Replayed = nil
+	end
 
 	local StartIndex =
 		ReplayMovementIndex or 1
@@ -1802,6 +1858,10 @@ local function ReplayMovement(
 			LastStuckCheck = 0
 			LastStuckPosition = RootPart.Position
 			StuckStartTime = os.clock()
+
+			for _, Action in ipairs(Recording.Actions or {}) do
+				Action._Replayed = (Action.Time or 0) < StartTime
+			end
 
 			ReplayRespawnPending = false
 			ReplayRespawnIndex = nil
